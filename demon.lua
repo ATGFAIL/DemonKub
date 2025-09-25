@@ -114,65 +114,6 @@ task.spawn(function()
     end
 end)
 
-
-    local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-
-local killAuraEnabled = false
-local attackRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("GeneralAttack") -- ปรับให้ตรงเกม
-
--- ระยะตรวจจับ NPC รอบตัว
-local radius = 2000
--- ระยะวาปไปข้างๆเป้าหมาย
-local offset = Vector3.new(3,0,0)
-
--- ฟังก์ชัน Kill Aura
-local function doKillAura()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    for _, model in ipairs(workspace:GetChildren()) do
-        if model:IsA("Model") and model ~= char then
-            local hum = model:FindFirstChildWhichIsA("Humanoid")
-            local hrp2 = model:FindFirstChild("HumanoidRootPart")
-            if hum and hrp2 and hum.Health > 0 then
-                -- เช็คว่าไม่ใช่ผู้เล่น
-                local plr = Players:GetPlayerFromCharacter(model)
-                if not plr then
-                    local dist = (hrp.Position - hrp2.Position).Magnitude
-                    if dist <= radius then
-                        -- วาปไปข้างๆเป้าหมาย
-                        hrp.CFrame = hrp2.CFrame * CFrame.new(offset)
-                        -- โจมตี
-                        pcall(function()
-                            attackRemote:FireServer(model)
-                        end)
-                    end
-                end
-            end
-        end
-    end
-end
-
--- Toggle Kill Aura
-local killButton = Tabs.Main:AddToggle("KillAuraToggle", {Title = "Kill Aura", Default = false})
-killButton:OnChanged(function(v)
-    killAuraEnabled = v
-end)
-
--- loop ทำงานออโต้
-RunService.RenderStepped:Connect(function()
-    if killAuraEnabled then
-        pcall(doKillAura)
-    end
-end)
-
-
-
     Tabs.Main:AddButton({
         Title = "Button",
         Description = "Very important button",
