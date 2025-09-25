@@ -61,9 +61,6 @@ local startTime = tick() -- เวลาเริ่มสคริปต์
 local infoParagraph = nil
 local char = nil
 local hum = nil
-local playedTime = 0
-local minutes = 0
-local hours = 0
 local content = ""
 
 -- สร้าง Paragraph
@@ -72,37 +69,47 @@ infoParagraph = Tabs.Main:AddParagraph({
     Content = "Loading player info..."
 })
 
+-- ฟังก์ชันช่วยเติมเลขให้เป็น 2 หลัก (เช่น 4 -> "04")
+local function pad2(n)
+    return string.format("%02d", tonumber(n) or 0)
+end
+
 -- ฟังก์ชันอัพเดทข้อมูล
 local function updateInfo()
+    -- รับตัวละคร / humanoid (ถ้ามี)
     char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    hum = char:FindFirstChildWhichIsA("Humanoid")
-    playedTime = tick() - startTime
+    hum = char and char:FindFirstChildWhichIsA("Humanoid")
 
-    minutes = math.floor(playedTime / 60)
-    hours = math.floor(minutes / 60)
-    minutes = minutes % 60
+    -- เวลาที่เล่น (วินาที, ปัดลง)
+    local playedSeconds = math.floor(tick() - startTime)
 
+    -- แยกชั่วโมง นาที วินาที
+    local hours = math.floor(playedSeconds / 3600)
+    local minutes = math.floor((playedSeconds % 3600) / 60)
+    local seconds = playedSeconds % 60
+
+    -- วันที่ปัจจุบัน รูปแบบ DD/MM/YYYY
+    local dateStr = os.date("%d/%m/%Y")
+
+    -- สร้างข้อความที่จะโชว์ (เอา Health/WalkSpeed/JumpPower ออกแล้ว)
     content = string.format([[
 Name: %s (@%s)
-UserId: %d
+Date : %s
 
-Health: %d / %d
-WalkSpeed: %d
-JumpPower: %d
-
-Played Time: %dh %dm
-]], 
-        LocalPlayer.DisplayName, 
-        LocalPlayer.Name, 
-        LocalPlayer.UserId,
-        hum and hum.Health or 0, 
-        hum and hum.MaxHealth or 0,
-        hum and hum.WalkSpeed or 0,
-        hum and hum.JumpPower or 0,
-        hours, minutes
+Played Time : %s : %s : %s
+]],
+        LocalPlayer.DisplayName or LocalPlayer.Name,
+        LocalPlayer.Name or "Unknown",
+        dateStr,
+        pad2(hours),
+        pad2(minutes),
+        pad2(seconds)
     )
 
-    infoParagraph:SetDesc(content)
+    -- อัปเดต Paragraph ใน UI
+    pcall(function()
+        infoParagraph:SetDesc(content)
+    end)
 end
 
 -- loop update ทุกๆ 1 วิ
@@ -114,74 +121,351 @@ task.spawn(function()
     end
 end)
 
-    Tabs.Main:AddButton({
-        Title = "Button",
-        Description = "Very important button",
-        Callback = function()
-            Window:Dialog({
-                Title = "Title",
-                Content = "This is a dialog",
-                Buttons = {
-                    {
-                        Title = "Confirm",
-                        Callback = function()
-                            print("Confirmed the dialog.")
-                        end
-                    },
-                    {
-                        Title = "Cancel",
-                        Callback = function()
-                            print("Cancelled the dialog.")
-                        end
-                    }
-                }
-            })
-        end
-    })
 
-spawn(function()
-    while true do
-        if isAttacking then
-            game:GetService("ReplicatedStorage").RemoteEvents.GeneralAttack:FireServer(1)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ตั้งค่าระยะห่างเหนือ Part
+local hoverHeight = 10
+
+-- ความเร็ว/ความลื่นของ align (ปรับได้)
+local alignResponsiveness = 40    -- ยิ่งสูง ยิ่งตามเป้าไว
+local targetLerp = 0.20           -- อัตรา lerp ในการย้าย targetPart (0-1)
+
+-- ควบคุมสถานะ AutoFarm
+local autoFarmEnabled = false
+local farmWorkerRunning = false
+
+-- เก็บสถานะ CanCollide เดิมเพื่อคืนค่า
+local savedCanCollide = {}
+
+-- Align objects / target part
+local targetPart = nil
+local hrpAttachment = nil
+local targetAttachment = nil
+local alignPos = nil
+local alignOri = nil
+
+-- ฟังก์ชันหา Part ทั้งหมดใน Model ที่สนใจ (คัดลอกจากของคุณ)
+local function getAllParts(models)
+    local parts = {}
+
+    local function scanFolder(folder)
+        for _, obj in ipairs(folder:GetChildren()) do
+            if obj:IsA("BasePart") then
+                table.insert(parts, obj)
+            elseif obj:IsA("Folder") or obj:IsA("Model") then
+                scanFolder(obj)
+            end
         end
-        wait(0.01) -- ปรับความเร็วได้
     end
+
+    for _, model in ipairs(models) do
+        if model and model.Parent then
+            scanFolder(model)
+        end
+    end
+
+    return parts
+end
+
+local function getNearestPart()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local models = {
+        workspace:FindFirstChild("NewBieGhostPos"),
+        workspace:FindFirstChild("GhostPos"),
+    }
+
+    local parts = getAllParts(models)
+    local nearestPart = nil
+    local shortestDist = math.huge
+
+    for _, part in ipairs(parts) do
+        if part and part:IsA("BasePart") then
+            local dist = (part.Position - hrp.Position).Magnitude
+            if dist < shortestDist then
+                shortestDist = dist
+                nearestPart = part
+            end
+        end
+    end
+
+    return nearestPart
+end
+
+-- เก็บ/คืนค่า CanCollide ของตัวละคร
+local function setCharacterCollisions(enable)
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    if enable then
+        for part, val in pairs(savedCanCollide) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = val end)
+            end
+        end
+        savedCanCollide = {}
+    else
+        savedCanCollide = {}
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                savedCanCollide[part] = part.CanCollide
+                pcall(function() part.CanCollide = false end)
+            end
+        end
+    end
+end
+
+-- สร้างระบบ Align (targetPart + Attachments + AlignPosition/Orientation)
+local function createAlignSystem()
+    -- ถ้ามีอยู่แล้ว ให้เคลียร์ก่อน
+    if targetPart and targetPart.Parent then
+        pcall(function() targetPart:Destroy() end)
+    end
+
+    -- target part (anchored, invisible)
+    targetPart = Instance.new("Part")
+    targetPart.Name = "ATG_AutoFarmTarget"
+    targetPart.Size = Vector3.new(0.2,0.2,0.2)
+    targetPart.Transparency = 1
+    targetPart.CanCollide = false
+    targetPart.Anchored = true
+    targetPart.Parent = workspace
+
+    -- หาก character มี HRP ให้สร้าง Attachment บน HRP
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    -- hrp attachment (ถ้ายังไม่มี)
+    hrpAttachment = hrp:FindFirstChild("ATG_HRP_Attachment")
+    if not hrpAttachment then
+        hrpAttachment = Instance.new("Attachment")
+        hrpAttachment.Name = "ATG_HRP_Attachment"
+        hrpAttachment.Parent = hrp
+        hrpAttachment.Position = Vector3.new(0,0,0)
+    end
+
+    -- target attachment
+    targetAttachment = targetPart:FindFirstChild("ATG_Target_Attachment")
+    if not targetAttachment then
+        targetAttachment = Instance.new("Attachment")
+        targetAttachment.Name = "ATG_Target_Attachment"
+        targetAttachment.Parent = targetPart
+    end
+
+    -- AlignPosition
+    alignPos = hrp:FindFirstChild("ATG_AlignPosition")
+    if not alignPos then
+        alignPos = Instance.new("AlignPosition")
+        alignPos.Name = "ATG_AlignPosition"
+        alignPos.Attachment0 = hrpAttachment
+        alignPos.Attachment1 = targetAttachment
+        alignPos.RigidityEnabled = false
+        alignPos.ReactionForceEnabled = false
+        alignPos.MaxForce = 1e6
+        alignPos.MaxVelocity = math.huge
+        alignPos.Responsiveness = alignResponsiveness
+        alignPos.Parent = hrp
+    end
+
+    -- AlignOrientation
+    alignOri = hrp:FindFirstChild("ATG_AlignOrientation")
+    if not alignOri then
+        alignOri = Instance.new("AlignOrientation")
+        alignOri.Name = "ATG_AlignOrientation"
+        alignOri.Attachment0 = hrpAttachment
+        alignOri.Attachment1 = targetAttachment
+        alignOri.MaxTorque = 1e6
+        alignOri.Responsiveness = alignResponsiveness
+        alignOri.Parent = hrp
+    end
+
+    return true
+end
+
+local function destroyAlignSystem()
+    if alignPos then
+        pcall(function() alignPos:Destroy() end)
+        alignPos = nil
+    end
+    if alignOri then
+        pcall(function() alignOri:Destroy() end)
+        alignOri = nil
+    end
+    if hrpAttachment then
+        pcall(function() hrpAttachment:Destroy() end)
+        hrpAttachment = nil
+    end
+    if targetAttachment then
+        pcall(function() targetAttachment:Destroy() end)
+        targetAttachment = nil
+    end
+    if targetPart then
+        pcall(function() targetPart:Destroy() end)
+        targetPart = nil
+    end
+end
+
+-- ฟังก์ชันหลัก เปิด/ปิด AutoFarm (ใช้ Align)
+local function enableAutoFarmAura(enable)
+    autoFarmEnabled = enable
+
+    if autoFarmEnabled and not farmWorkerRunning then
+        farmWorkerRunning = true
+
+        -- ตรวจสอบ character พร้อม แล้วสร้าง align system
+        if not LocalPlayer.Character then
+            LocalPlayer.CharacterAdded:Wait()
+        end
+        -- รอ HRP
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:WaitForChild("HumanoidRootPart", 5)
+        if not hrp then
+            warn("AutoFarm: HRP not found")
+            farmWorkerRunning = false
+            return
+        end
+
+        -- ปิดการชนของตัวละครเพื่อให้ทะลุ (เก็บค่าเดิม)
+        setCharacterCollisions(false)
+
+        -- สร้างระบบ Align
+        local ok = createAlignSystem()
+        if not ok then
+            warn("AutoFarm: failed to create align system")
+            setCharacterCollisions(true)
+            farmWorkerRunning = false
+            return
+        end
+
+        -- loop อัพเดต targetPart ไปยัง nearestPart (ใช้ lerp เพื่อความลื่น)
+        task.spawn(function()
+            while autoFarmEnabled do
+                -- หาก character respawn ให้รีเซ็ตระบบ
+                if not LocalPlayer.Character or not LocalPlayer.Character.Parent then
+                    -- รอ character ใหม่ แล้ว recreate align
+                    LocalPlayer.CharacterAdded:Wait()
+                    task.wait(0.2)
+                    destroyAlignSystem()
+                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                        createAlignSystem()
+                    end
+                    setCharacterCollisions(false)
+                end
+
+                local nearest = getNearestPart()
+                if nearest and targetPart then
+                    local desired = nearest.Position + Vector3.new(0, hoverHeight, 0)
+                    -- lerp target position เล็กน้อยเพื่อลดกระโดด
+                    local currentCFrame = targetPart.CFrame
+                    local goalCFrame = CFrame.new(desired)
+                    targetPart.CFrame = currentCFrame:Lerp(goalCFrame, targetLerp)
+                end
+
+                -- สั้น ๆ เพื่อไม่ให้หน่วงมาก
+                task.wait(0.06)
+            end
+
+            -- ปิด/คืนค่าเมื่อหยุด
+            destroyAlignSystem()
+            setCharacterCollisions(true)
+            farmWorkerRunning = false
+        end)
+
+    elseif not autoFarmEnabled then
+        -- ปิดทันที: เคลียร์ทุกอย่าง
+        autoFarmEnabled = false
+        destroyAlignSystem()
+        setCharacterCollisions(true)
+        farmWorkerRunning = false
+    end
+end
+
+-- UI Toggle (ใช้ของคุณ)
+local autoFarmToggle = Tabs.Main:AddToggle("AutoFarmAuraToggle", {
+    Title = "Auto Farm Aura",
+    Default = false,
+})
+autoFarmToggle:OnChanged(function(v)
+    enableAutoFarmAura(v)
 end)
 
 
 
-    
-    local Slider = Tabs.Main:AddSlider("Slider", {
-        Title = "Slider",
-        Description = "This is a slider",
-        Default = 2,
-        Min = 0,
-        Max = 5,
-        Rounding = 1,
-        Callback = function(Value)
-            print("Slider was changed:", Value)
-        end
-    })
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local remote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("GeneralAttack")
 
-    Slider:OnChanged(function(Value)
-        print("Slider changed:", Value)
-    end)
+-- กำหนดชุด args ที่จะยิงทีละอัน (ตามที่ผู้ใช้ให้มา)
+local argsList = {
+    { [1] = 4 },
+    { [1] = 1 },
+    { [1] = 2 },
+    { [1] = 3 },
+}
 
-    Slider:SetValue(3)
+-- ตั้งค่าเริ่มต้นของ delay (วินาที ระหว่างการยิงแต่ละอัน)
+local delayBetweenShots = 0.01
 
+-- สถานะควบคุมการทำงานของ loop และตัวแปรกันซ้ำ
+local fastAttackEnabled = false
+local workerRunning = false
 
-    local Dropdown = Tabs.Main:AddDropdown("Dropdown", {
-        Title = "Dropdown",
-        Values = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen"},
-        Multi = false,
-        Default = 1,
-    })
+-- ฟังก์ชันเปิด/ปิด Fast Attack
+local function enableFastAttack(enable)
+    fastAttackEnabled = enable
 
-    Dropdown:SetValue("four")
+    -- ถ้าเปิดแล้ว worker ยังไม่รัน ให้ spawn มัน
+    if fastAttackEnabled and not workerRunning then
+        workerRunning = true
+        task.spawn(function()
+            while fastAttackEnabled do
+                -- วนยิงทีละอัน ตามลำดับ และเว้นระยะ 0.01 วิ ระหว่างแต่ละการยิง
+                for idx, args in ipairs(argsList) do
+                    -- ถ้าระหว่างการยิงมีการปิด ให้ break ออกทั้ง loop ทันที
+                    if not fastAttackEnabled then break end
 
-    Dropdown:OnChanged(function(Value)
-        print("Dropdown changed:", Value)
-    end)
+                    local ok, err = pcall(function()
+                        remote:FireServer(unpack(args))
+                    end)
+                    if not ok then
+                        warn(string.format("FastAttack - shot %d failed: %s", idx, tostring(err)))
+                    end
+
+                    -- รอระยะสั้นก่อนยิงตัวถัดไป
+                    task.wait(delayBetweenShots)
+                end
+
+                -- ถ้ายังเปิดอยู่ จะวนทำรอบถัดไปโดยอัตโนมัติ (ไม่มีการจำกัดจำนวนรอบ)
+            end
+
+            -- worker จะมาถึงตรงนี้เมื่อ fastAttackEnabled == false
+            workerRunning = false
+        end)
+    end
+    -- ถ้าปิด จะให้ loop หยุดเองเพราะ fastAttackEnabled = false
+end
+
+-- สร้าง Toggle ใน UI แทน AntiAFK (ตามตัวอย่างของคุณ)
+local fastAttackToggle = Tabs.Main:AddToggle("FastAttackToggle", {
+    Title = "Fast Attack",
+    Default = false, -- กำหนดค่า default ตามต้องการ
+})
+
+fastAttackToggle:OnChanged(function(v)
+    enableFastAttack(v)
+end)
+
+-- (ถ้าต้องการให้เปิดโดย default ให้ใช้บรรทัดด้านล่าง)
+-- fastAttackToggle:SetValue(true)
+-- enableFastAttack(true)
+
+-- ตัวเลือกเพิ่มเติม (ถ้าต้องการให้ผู้ใช้ปรับ delay ผ่าน UI)
+-- local delaySlider = Tabs.Settings:AddSlider("FastAttackDelay", { Title = "Delay (s)", Min = 0.001, Max = 0.1, Default = 0.01, Precision = 0.001 })
+-- delaySlider:OnChanged(function(val) delayBetweenShots = val end)
 
     -- สร้างตัวแปรเก็บค่า Dropdown ปัจจุบัน
 local selectedZone = "Zone 1"
@@ -189,7 +473,7 @@ local selectedZone = "Zone 1"
 -- สร้าง Dropdown
 local Dropdown = Tabs.Teleport:AddDropdown("Teleport", {
     Title = "Select to Teleport",
-    Values = {"Zone 1", "Zone 2"},
+    Values = {"Zone 1", "Zone 2","Zone 3","Zone 4", "Zone 5", "Zone 6", "Zone 7", "Zone 8"},
     Multi = false,
     Default = 1,
 })
@@ -221,9 +505,21 @@ Tabs.Teleport:AddButton({
                         local hrp = char:WaitForChild("HumanoidRootPart")
                         
                         if selectedZone == "Zone 1" then
-                            hrp.CFrame = CFrame.new(200, 30, -300)
+                            hrp.CFrame = CFrame.new(17240, 40, 850)
                         elseif selectedZone == "Zone 2" then
+                            hrp.CFrame = CFrame.new(17300, 50, -15)
+                        elseif selectedZone == "Zone 3" then
+                            hrp.CFrame = CFrame.new(-1, 50, -501)
+                        elseif selectedZone == "Zone 4" then
+                            hrp.CFrame = CFrame.new(200, 30, -300)
+                        elseif selectedZone == "Zone 5" then
                             hrp.CFrame = CFrame.new(45, 30, 70)
+                        elseif selectedZone == "Zone 6" then
+                            hrp.CFrame = CFrame.new(430, 50, 450)
+                        elseif selectedZone == "Zone 7" then
+                            hrp.CFrame = CFrame.new(430, 50, 707)
+                        elseif selectedZone == "Zone 8" then
+                            hrp.CFrame = CFrame.new(480, 50, 960)
                         end
 
                         print("Teleported to " .. selectedZone)
@@ -304,74 +600,79 @@ if LocalPlayer.Character then
     end)
 end
 
+    -- Auto Skill System
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local skillRemote = ReplicatedStorage:WaitForChild("RemoteEvents"):WaitForChild("SkillAttack")
 
+-- mapping ของสกิลกับ args
+local skillMap = {
+    Q = { [1] = 1 },
+    E = { [1] = 2 },
+    R = { [1] = 3 },
+}
 
-    
-    local MultiDropdown = Tabs.Main:AddDropdown("MultiDropdown", {
-        Title = "Dropdown",
-        Description = "You can select multiple values.",
-        Values = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen"},
-        Multi = true,
-        Default = {"seven", "twelve"},
-    })
+-- ตัวเลือก skill ที่ผู้ใช้เลือกจาก MultiDropdown
+local selectedSkills = { "Q", "E", "R" }
 
-    MultiDropdown:SetValue({
-        three = true,
-        five = true,
-        seven = false
-    })
+-- ตัวแปรควบคุม loop
+local autoSkillEnabled = false
+local skillWorkerRunning = false
 
-    MultiDropdown:OnChanged(function(Value)
-        local Values = {}
-        for Value, State in next, Value do
-            table.insert(Values, Value)
+-- MultiDropdown UI
+local MultiDropdown = Tabs.Main:AddDropdown("MultiDropdown", {
+    Title = "Auto Skill",
+    Description = "Select Skills",
+    Values = {"Q", "E", "R"},
+    Multi = true,
+    Default = {"Q", "E", "R"},
+})
+
+MultiDropdown:OnChanged(function(values)
+    selectedSkills = {}
+    for value, state in next, values do
+        if state then
+            table.insert(selectedSkills, value)
         end
-        print("Mutlidropdown changed:", table.concat(Values, ", "))
-    end)
+    end
+    print("Selected Skills:", table.concat(selectedSkills, ", "))
+end)
 
+-- ฟังก์ชันเปิดปิด Auto Skill
+local function enableAutoSkill(enable)
+    autoSkillEnabled = enable
+    if autoSkillEnabled and not skillWorkerRunning then
+        skillWorkerRunning = true
+        task.spawn(function()
+            while autoSkillEnabled do
+                for _, skill in ipairs(selectedSkills) do
+                    if not autoSkillEnabled then break end
+                    local args = skillMap[skill]
+                    if args then
+                        local ok, err = pcall(function()
+                            skillRemote:FireServer(unpack(args))
+                        end)
+                        if not ok then
+                            warn("AutoSkill failed for:", skill, err)
+                        end
+                    end
+                    task.wait(0.5) -- ดีเลย์ระหว่างสกิลแต่ละอัน (ปรับได้)
+                end
+                task.wait(0.1) -- ดีเลย์ระหว่างรอบ
+            end
+            skillWorkerRunning = false
+        end)
+    end
+end
 
+-- Toggle UI สำหรับเปิด/ปิด Auto Skill
+local autoSkillToggle = Tabs.Main:AddToggle("AutoSkillToggle", {
+    Title = "Enable Auto Skill",
+    Default = false,
+})
 
-    local Colorpicker = Tabs.Main:AddColorpicker("Colorpicker", {
-        Title = "Colorpicker",
-        Default = Color3.fromRGB(96, 205, 255)
-    })
-
-    Colorpicker:OnChanged(function()
-        print("Colorpicker changed:", Colorpicker.Value)
-    end)
-    
-    Colorpicker:SetValueRGB(Color3.fromRGB(0, 255, 140))
-
-
-
-    local TColorpicker = Tabs.Main:AddColorpicker("TransparencyColorpicker", {
-        Title = "Colorpicker",
-        Description = "but you can change the transparency.",
-        Transparency = 0,
-        Default = Color3.fromRGB(96, 205, 255)
-    })
-
-    TColorpicker:OnChanged(function()
-        print(
-            "TColorpicker changed:", TColorpicker.Value,
-            "Transparency:", TColorpicker.Transparency
-        )
-    end)
-
-    local Input = Tabs.Main:AddInput("Input", {
-        Title = "Input",
-        Default = "Default",
-        Placeholder = "Placeholder",
-        Numeric = false, -- Only allows numbers
-        Finished = false, -- Only calls callback when you press enter
-        Callback = function(Value)
-            print("Input changed:", Value)
-        end
-    })
-
-    Input:OnChanged(function()
-        print("Input updated:", Input.Value)
-    end)
+autoSkillToggle:OnChanged(function(v)
+    enableAutoSkill(v)
+end)
 end
 
 -- -----------------------
@@ -521,7 +822,96 @@ Players.PlayerAdded:Connect(function(p)
 end)
 Players.PlayerRemoving:Connect(function(p) removeESPForPlayer(p) end)
 
+-- -----------------------
+-- Teleport to Player (Dropdown + Button)
+-- -----------------------
+local playerListDropdown = Tabs.Teleport:AddDropdown("TeleportToPlayerDropdown", {
+    Title = "Select Player to Teleport",
+    Values = {},
+    Multi = false,
+    Default = 1
+})
 
+local function refreshPlayerDropdown()
+    local vals = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(vals, p.Name)
+        end
+    end
+    if #vals == 0 then
+        vals = {"No other players"}
+        playerListDropdown:SetValues(vals)
+        playerListDropdown:SetValue(vals[1])
+        return
+    end
+    playerListDropdown:SetValues(vals)
+    playerListDropdown:SetValue(vals[1])
+end
+
+-- init and update on join/leave
+refreshPlayerDropdown()
+Players.PlayerAdded:Connect(function(p)
+    task.delay(0.5, refreshPlayerDropdown)
+end)
+Players.PlayerRemoving:Connect(function(p)
+    task.delay(0.5, refreshPlayerDropdown)
+end)
+
+Tabs.Teleport:AddButton({
+    Title = "Teleport to Selected Player",
+    Description = "Teleport to the player selected in the dropdown",
+    Callback = function()
+        local sel = playerListDropdown.Value
+        if not sel or sel == "No other players" then notify("Teleport", "No player selected", 3); return end
+        local target = Players:FindFirstChild(sel)
+        if not target then notify("Teleport", "Player not found", 3); return end
+        if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(0,3,0)
+                notify("Teleport", "Teleported to "..target.Name, 3)
+            end
+        else
+            notify("Teleport", "Target character not available", 3)
+        end
+    end
+})
+
+-- -----------------------
+-- Anti-AFK
+-- -----------------------
+do
+    local vu = nil
+    -- VirtualUser trick: works in many environments (Roblox default)
+    local function enableAntiAFK(enable)
+        if enable then
+            if not vu then
+                -- VirtualUser exists only in Roblox client; we get via game:GetService("VirtualUser") (works in studio / client)
+                pcall(function() vu = game:GetService("VirtualUser") end)
+            end
+            if vu then
+                Players.LocalPlayer.Idled:Connect(function()
+                    pcall(function()
+                        vu:Button2Down(Vector2.new(0,0))
+                        task.wait(1)
+                        vu:Button2Up(Vector2.new(0,0))
+                    end)
+                end)
+            end
+            notify("Anti-AFK", "Anti-AFK enabled", 3)
+        else
+            -- Can't fully disconnect all Idled events if there are others, but setting to nil stops new ones
+            notify("Anti-AFK", "Anti-AFK disabled (client may still have other handlers)", 3)
+        end
+    end
+
+    local antiAFKToggle = Tabs.Settings:AddToggle("AntiAFKToggle", { Title = "Anti-AFK", Default = true })
+    antiAFKToggle:OnChanged(function(v) enableAntiAFK(v) end)
+    -- default on
+    antiAFKToggle:SetValue(true)
+    enableAntiAFK(true)
+end
 
 -- -----------------------
 -- Server Hop
