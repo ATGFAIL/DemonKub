@@ -34,9 +34,10 @@ local Window = Fluent:CreateWindow({
 
 --Fluent provides Lucide Icons https://lucide.dev/icons/ for the tabs, icons are optional
 local Tabs = {
-    Main = Window:AddTab({ Title = "Main", Icon = "" }),
-    Players = Window:AddTab({ Title = "Players", Icon = "" }),
-    Teleport = Window:AddTab({ Title = "Teleport", Icon = "" }),
+    Main = Window:AddTab({ Title = "Main", Icon = "Main" }),
+    Players = Window:AddTab({ Title = "Players", Icon = "Players" }),
+    Teleport = Window:AddTab({ Title = "Teleport", Icon = "Teleport" }),
+    ESP = Window:AddTab({ Title = "ESP", Icon = "ESP"}),
     Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
 }
 
@@ -126,51 +127,39 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
--- ตั้งค่าระยะห่างเหนือ Part
+-- ตั้งค่าพื้นฐาน
 local hoverHeight = 10
+local alignResponsiveness = 50   -- ยิ่งสูงตามเป้าไว
+local targetLerp = 0.25          -- 0-1 ยิ่งสูงยิ่งลื่น
+local refreshDelay = 0.05        -- ความถี่ในการอัพเดต
 
--- ความเร็ว/ความลื่นของ align (ปรับได้)
-local alignResponsiveness = 40    -- ยิ่งสูง ยิ่งตามเป้าไว
-local targetLerp = 0.20           -- อัตรา lerp ในการย้าย targetPart (0-1)
-
--- ควบคุมสถานะ AutoFarm
 local autoFarmEnabled = false
 local farmWorkerRunning = false
-
--- เก็บสถานะ CanCollide เดิมเพื่อคืนค่า
 local savedCanCollide = {}
 
--- Align objects / target part
-local targetPart = nil
-local hrpAttachment = nil
-local targetAttachment = nil
-local alignPos = nil
-local alignOri = nil
+-- Align objects
+local targetPart, hrpAttachment, targetAttachment, alignPos, alignOri = nil, nil, nil, nil, nil
 
--- ฟังก์ชันหา Part ทั้งหมดใน Model ที่สนใจ (คัดลอกจากของคุณ)
+-- หา BasePart ทั้งหมดใน Model (recursive)
 local function getAllParts(models)
     local parts = {}
-
-    local function scanFolder(folder)
-        for _, obj in ipairs(folder:GetChildren()) do
-            if obj:IsA("BasePart") then
-                table.insert(parts, obj)
-            elseif obj:IsA("Folder") or obj:IsA("Model") then
-                scanFolder(obj)
+    local function scan(obj)
+        for _, v in ipairs(obj:GetChildren()) do
+            if v:IsA("BasePart") then
+                table.insert(parts, v)
+            elseif v:IsA("Model") or v:IsA("Folder") then
+                scan(v)
             end
         end
     end
-
-    for _, model in ipairs(models) do
-        if model and model.Parent then
-            scanFolder(model)
-        end
+    for _, m in ipairs(models) do
+        if m and m.Parent then scan(m) end
     end
-
     return parts
 end
 
-local function getNearestPart()
+-- หา Part ที่ใกล้ที่สุด + ต้องมี Model ข้างในอยู่ด้วย
+local function getNearestValidPart()
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
@@ -179,34 +168,38 @@ local function getNearestPart()
         workspace:FindFirstChild("NewBieGhostPos"),
         workspace:FindFirstChild("GhostPos"),
     }
-
     local parts = getAllParts(models)
-    local nearestPart = nil
-    local shortestDist = math.huge
 
+    local nearest, minDist = nil, math.huge
     for _, part in ipairs(parts) do
-        if part and part:IsA("BasePart") then
-            local dist = (part.Position - hrp.Position).Magnitude
-            if dist < shortestDist then
-                shortestDist = dist
-                nearestPart = part
+        if part and part:IsA("BasePart") and part.Parent then
+            -- เช็คว่ามี Model อยู่ข้างใน part
+            local hasModel = false
+            for _, child in ipairs(part:GetChildren()) do
+                if child:IsA("Model") then
+                    hasModel = true
+                    break
+                end
+            end
+            if hasModel then
+                local dist = (part.Position - hrp.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = part
+                end
             end
         end
     end
-
-    return nearestPart
+    return nearest
 end
 
--- เก็บ/คืนค่า CanCollide ของตัวละคร
+-- เก็บ/คืนค่า CanCollide
 local function setCharacterCollisions(enable)
     local char = LocalPlayer.Character
     if not char then return end
-
     if enable then
         for part, val in pairs(savedCanCollide) do
-            if part and part.Parent then
-                pcall(function() part.CanCollide = val end)
-            end
+            if part and part.Parent then pcall(function() part.CanCollide = val end) end
         end
         savedCanCollide = {}
     else
@@ -220,179 +213,108 @@ local function setCharacterCollisions(enable)
     end
 end
 
--- สร้างระบบ Align (targetPart + Attachments + AlignPosition/Orientation)
+-- สร้าง Align System
 local function createAlignSystem()
-    -- ถ้ามีอยู่แล้ว ให้เคลียร์ก่อน
-    if targetPart and targetPart.Parent then
-        pcall(function() targetPart:Destroy() end)
-    end
+    destroyAlignSystem()
 
-    -- target part (anchored, invisible)
     targetPart = Instance.new("Part")
     targetPart.Name = "ATG_AutoFarmTarget"
-    targetPart.Size = Vector3.new(0.2,0.2,0.2)
+    targetPart.Size = Vector3.new(0.2, 0.2, 0.2)
     targetPart.Transparency = 1
     targetPart.CanCollide = false
     targetPart.Anchored = true
     targetPart.Parent = workspace
 
-    -- หาก character มี HRP ให้สร้าง Attachment บน HRP
-    local char = LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return false end
 
-    -- hrp attachment (ถ้ายังไม่มี)
-    hrpAttachment = hrp:FindFirstChild("ATG_HRP_Attachment")
-    if not hrpAttachment then
-        hrpAttachment = Instance.new("Attachment")
-        hrpAttachment.Name = "ATG_HRP_Attachment"
-        hrpAttachment.Parent = hrp
-        hrpAttachment.Position = Vector3.new(0,0,0)
-    end
+    hrpAttachment = Instance.new("Attachment")
+    hrpAttachment.Name = "ATG_HRP_Attachment"
+    hrpAttachment.Parent = hrp
 
-    -- target attachment
-    targetAttachment = targetPart:FindFirstChild("ATG_Target_Attachment")
-    if not targetAttachment then
-        targetAttachment = Instance.new("Attachment")
-        targetAttachment.Name = "ATG_Target_Attachment"
-        targetAttachment.Parent = targetPart
-    end
+    targetAttachment = Instance.new("Attachment")
+    targetAttachment.Name = "ATG_Target_Attachment"
+    targetAttachment.Parent = targetPart
 
-    -- AlignPosition
-    alignPos = hrp:FindFirstChild("ATG_AlignPosition")
-    if not alignPos then
-        alignPos = Instance.new("AlignPosition")
-        alignPos.Name = "ATG_AlignPosition"
-        alignPos.Attachment0 = hrpAttachment
-        alignPos.Attachment1 = targetAttachment
-        alignPos.RigidityEnabled = false
-        alignPos.ReactionForceEnabled = false
-        alignPos.MaxForce = 1e6
-        alignPos.MaxVelocity = math.huge
-        alignPos.Responsiveness = alignResponsiveness
-        alignPos.Parent = hrp
-    end
+    alignPos = Instance.new("AlignPosition")
+    alignPos.Attachment0 = hrpAttachment
+    alignPos.Attachment1 = targetAttachment
+    alignPos.MaxForce = 1e9
+    alignPos.MaxVelocity = math.huge
+    alignPos.Responsiveness = alignResponsiveness
+    alignPos.Parent = hrp
 
-    -- AlignOrientation
-    alignOri = hrp:FindFirstChild("ATG_AlignOrientation")
-    if not alignOri then
-        alignOri = Instance.new("AlignOrientation")
-        alignOri.Name = "ATG_AlignOrientation"
-        alignOri.Attachment0 = hrpAttachment
-        alignOri.Attachment1 = targetAttachment
-        alignOri.MaxTorque = 1e6
-        alignOri.Responsiveness = alignResponsiveness
-        alignOri.Parent = hrp
-    end
+    alignOri = Instance.new("AlignOrientation")
+    alignOri.Attachment0 = hrpAttachment
+    alignOri.Attachment1 = targetAttachment
+    alignOri.MaxTorque = 1e9
+    alignOri.Responsiveness = alignResponsiveness
+    alignOri.Parent = hrp
 
     return true
 end
 
-local function destroyAlignSystem()
-    if alignPos then
-        pcall(function() alignPos:Destroy() end)
-        alignPos = nil
+-- ลบ Align System
+function destroyAlignSystem()
+    for _, obj in ipairs({alignPos, alignOri, hrpAttachment, targetAttachment, targetPart}) do
+        pcall(function() if obj then obj:Destroy() end end)
     end
-    if alignOri then
-        pcall(function() alignOri:Destroy() end)
-        alignOri = nil
-    end
-    if hrpAttachment then
-        pcall(function() hrpAttachment:Destroy() end)
-        hrpAttachment = nil
-    end
-    if targetAttachment then
-        pcall(function() targetAttachment:Destroy() end)
-        targetAttachment = nil
-    end
-    if targetPart then
-        pcall(function() targetPart:Destroy() end)
-        targetPart = nil
-    end
+    alignPos, alignOri, hrpAttachment, targetAttachment, targetPart = nil, nil, nil, nil, nil
 end
 
--- ฟังก์ชันหลัก เปิด/ปิด AutoFarm (ใช้ Align)
+-- ฟังก์ชันหลัก
 local function enableAutoFarmAura(enable)
     autoFarmEnabled = enable
-
     if autoFarmEnabled and not farmWorkerRunning then
         farmWorkerRunning = true
 
-        -- ตรวจสอบ character พร้อม แล้วสร้าง align system
-        if not LocalPlayer.Character then
-            LocalPlayer.CharacterAdded:Wait()
-        end
-        -- รอ HRP
-        local hrp = LocalPlayer.Character and LocalPlayer.Character:WaitForChild("HumanoidRootPart", 5)
-        if not hrp then
-            warn("AutoFarm: HRP not found")
-            farmWorkerRunning = false
-            return
-        end
+        if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
+        LocalPlayer.Character:WaitForChild("HumanoidRootPart", 5)
 
-        -- ปิดการชนของตัวละครเพื่อให้ทะลุ (เก็บค่าเดิม)
         setCharacterCollisions(false)
-
-        -- สร้างระบบ Align
-        local ok = createAlignSystem()
-        if not ok then
-            warn("AutoFarm: failed to create align system")
+        if not createAlignSystem() then
             setCharacterCollisions(true)
             farmWorkerRunning = false
             return
         end
 
-        -- loop อัพเดต targetPart ไปยัง nearestPart (ใช้ lerp เพื่อความลื่น)
         task.spawn(function()
             while autoFarmEnabled do
-                -- หาก character respawn ให้รีเซ็ตระบบ
-                if not LocalPlayer.Character or not LocalPlayer.Character.Parent then
-                    -- รอ character ใหม่ แล้ว recreate align
+                local char = LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if not char or not hrp then
                     LocalPlayer.CharacterAdded:Wait()
-                    task.wait(0.2)
+                    task.wait(0.3)
                     destroyAlignSystem()
-                    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                        createAlignSystem()
-                    end
+                    createAlignSystem()
                     setCharacterCollisions(false)
                 end
 
-                local nearest = getNearestPart()
+                local nearest = getNearestValidPart()
                 if nearest and targetPart then
                     local desired = nearest.Position + Vector3.new(0, hoverHeight, 0)
-                    -- lerp target position เล็กน้อยเพื่อลดกระโดด
-                    local currentCFrame = targetPart.CFrame
-                    local goalCFrame = CFrame.new(desired)
-                    targetPart.CFrame = currentCFrame:Lerp(goalCFrame, targetLerp)
+                    targetPart.CFrame = targetPart.CFrame:Lerp(CFrame.new(desired), targetLerp)
                 end
-
-                -- สั้น ๆ เพื่อไม่ให้หน่วงมาก
-                task.wait(0.06)
+                task.wait(refreshDelay)
             end
 
-            -- ปิด/คืนค่าเมื่อหยุด
             destroyAlignSystem()
             setCharacterCollisions(true)
             farmWorkerRunning = false
         end)
-
-    elseif not autoFarmEnabled then
-        -- ปิดทันที: เคลียร์ทุกอย่าง
-        autoFarmEnabled = false
+    else
         destroyAlignSystem()
         setCharacterCollisions(true)
         farmWorkerRunning = false
     end
 end
 
--- UI Toggle (ใช้ของคุณ)
+-- UI
 local autoFarmToggle = Tabs.Main:AddToggle("AutoFarmAuraToggle", {
     Title = "Auto Farm Aura",
     Default = false,
 })
-autoFarmToggle:OnChanged(function(v)
-    enableAutoFarmAura(v)
-end)
+autoFarmToggle:OnChanged(enableAutoFarmAura)
 
 
 
@@ -467,6 +389,77 @@ end)
 -- local delaySlider = Tabs.Settings:AddSlider("FastAttackDelay", { Title = "Delay (s)", Min = 0.001, Max = 0.1, Default = 0.01, Precision = 0.001 })
 -- delaySlider:OnChanged(function(val) delayBetweenShots = val end)
 
+-- Services
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- === CONFIG ===
+local AutoClicking = false
+local ClickDelay = 0.1 -- default 100ms
+local LastClick = 0
+
+-- ฟังก์ชันคลิกเสถียร
+local function DoClick()
+    -- จำลองการกดและปล่อยเมาส์ซ้าย
+    UserInputService.InputBegan:Fire({UserInputType = Enum.UserInputType.MouseButton1})
+    UserInputService.InputEnded:Fire({UserInputType = Enum.UserInputType.MouseButton1})
+end
+
+-- Loop ยิงคลิกตาม delay
+RunService.RenderStepped:Connect(function()
+    if AutoClicking then
+        if tick() - LastClick >= ClickDelay then
+            LastClick = tick()
+            DoClick()
+        end
+    end
+end)
+
+-- === UI (ต่อกับ Fluent ได้เลย) ===
+
+-- Toggle เปิด/ปิด
+local AutoClickToggle = Tabs.Main:AddToggle("AutoClickToggle", {
+    Title = "Auto Click",
+    Default = false
+})
+
+AutoClickToggle:OnChanged(function()
+    AutoClicking = Options.AutoClickToggle.Value
+    print("AutoClicking:", AutoClicking)
+end)
+
+-- Slider หน่วงเวลา
+local AutoClickSlider = Tabs.Main:AddSlider("AutoClickDelay", {
+    Title = "Click Delay (ms)",
+    Description = "ปรับความเร็วคลิก",
+    Default = 100,
+    Min = 10,
+    Max = 1000,
+    Rounding = 0,
+    Callback = function(Value)
+        ClickDelay = Value / 1000
+        print("Click delay:", ClickDelay .. "s")
+    end
+})
+AutoClickSlider:SetValue(100)
+
+-- Keybind เปิดปิด AutoClick (เช่น F6)
+local AutoClickKeybind = Tabs.Main:AddKeybind("AutoClickKey", {
+    Title = "AutoClick Key",
+    Mode = "Toggle",
+    Default = "F6",
+    Callback = function(Value)
+        AutoClicking = Value
+        Options.AutoClickToggle:SetValue(Value) -- sync กับ toggle UI
+        print("AutoClick via keybind:", Value)
+    end
+})
+
+
+
     -- สร้างตัวแปรเก็บค่า Dropdown ปัจจุบัน
 local selectedZone = "Zone 1"
 
@@ -540,25 +533,63 @@ Tabs.Teleport:AddButton({
 -- Speed & Jump sliders
 -- -----------------------
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
 local LocalPlayer = Players.LocalPlayer
+local Humanoid
 
+-- ค่าเริ่มต้น
+local CurrentWalkSpeed = 16
+local CurrentJumpPower = 50
+
+-- ฟังก์ชันหา Humanoid
+local function getHumanoid()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    return char:FindFirstChildWhichIsA("Humanoid")
+end
+
+-- ฟังก์ชันเซ็ต WalkSpeed
 local function setWalkSpeed(v)
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hum = char:FindFirstChildWhichIsA("Humanoid")
-    if hum then 
-        hum.WalkSpeed = v 
+    CurrentWalkSpeed = v
+    Humanoid = getHumanoid()
+    if Humanoid then
+        Humanoid.WalkSpeed = v
     end
 end
 
+-- ฟังก์ชันเซ็ต JumpPower
 local function setJumpPower(v)
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hum = char:FindFirstChildWhichIsA("Humanoid")
-    if hum then 
-        hum.JumpPower = v 
+    CurrentJumpPower = v
+    Humanoid = getHumanoid()
+    if Humanoid then
+        Humanoid.JumpPower = v
     end
 end
 
--- WalkSpeed Slider
+-- อัปเดต Humanoid ทุกครั้งที่ตัวละครตาย/รีสปอน
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(1) -- รอโหลด Humanoid ให้เสร็จ
+    Humanoid = getHumanoid()
+    if Humanoid then
+        Humanoid.WalkSpeed = CurrentWalkSpeed
+        Humanoid.JumpPower = CurrentJumpPower
+    end
+end)
+
+-- Loop ย้ำค่าตลอด (กันเกมรีเซ็ต)
+RunService.Stepped:Connect(function()
+    Humanoid = getHumanoid()
+    if Humanoid then
+        if Humanoid.WalkSpeed ~= CurrentWalkSpeed then
+            Humanoid.WalkSpeed = CurrentWalkSpeed
+        end
+        if Humanoid.JumpPower ~= CurrentJumpPower then
+            Humanoid.JumpPower = CurrentJumpPower
+        end
+    end
+end)
+
+-- === UI Slider ===
 local speedSlider = Tabs.Players:AddSlider("WalkSpeedSlider", {
     Title = "WalkSpeed",
     Default = 16,
@@ -571,11 +602,10 @@ local speedSlider = Tabs.Players:AddSlider("WalkSpeedSlider", {
 })
 speedSlider:OnChanged(setWalkSpeed)
 
--- JumpPower Slider
-local jumpSlider = Tabs.Players:AddSlider("JumpSlider", {
+local jumpSlider = Tabs.Players:AddSlider("JumpPowerSlider", {
     Title = "JumpPower",
     Default = 50,
-    Min = 0,
+    Min = 10,
     Max = 300,
     Rounding = 0,
     Callback = function(Value)
@@ -584,21 +614,6 @@ local jumpSlider = Tabs.Players:AddSlider("JumpSlider", {
 })
 jumpSlider:OnChanged(setJumpPower)
 
--- ensure defaults applied on spawn/character added
-LocalPlayer.CharacterAdded:Connect(function(char)
-    task.delay(0.5, function()
-        setWalkSpeed(speedSlider.Value or 16)
-        setJumpPower(jumpSlider.Value or 50)
-    end)
-end)
-
--- apply immediately if character already loaded
-if LocalPlayer.Character then
-    task.delay(0.5, function()
-        setWalkSpeed(speedSlider.Value or 16)
-        setJumpPower(jumpSlider.Value or 50)
-    end)
-end
 
     -- Auto Skill System
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -699,128 +714,383 @@ local function notify(title, content, duration)
     })
 end
 
--- -----------------------
--- Fly (simple) & Noclip
--- -----------------------
-local flyForce = {bv = nil, bg = nil}
-local function enableFly(enable)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if enable then
-        if hrp then
-            flyForce.bv = Instance.new("BodyVelocity")
-            flyForce.bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-            flyForce.bv.Velocity = Vector3.new(0,0,0)
-            flyForce.bv.Parent = hrp
+-- Fly & Noclip (improved, stable)
+do
+    state = state or {}
+    state.flyEnabled = state.flyEnabled or false
+    state.noclipEnabled = state.noclipEnabled or false
 
-            flyForce.bg = Instance.new("BodyGyro")
-            flyForce.bg.MaxTorque = Vector3.new(1e5,1e5,1e5)
-            flyForce.bg.CFrame = hrp.CFrame
-            flyForce.bg.Parent = hrp
+    local RunService = game:GetService("RunService")
+    local UserInputService = game:GetService("UserInputService")
+    local bindName = "ATG_FlyStep"
+    local fly = {
+        bv = nil,
+        bg = nil,
+        speed = 60,           -- default speed (can be adjusted by slider)
+        smoothing = 0.35,     -- lerp for velocity smoothing
+        bound = false
+    }
+    local savedCanCollide = {} -- map part -> bool (to restore when disabling noclip)
 
-            notify("Fly", "Fly enabled", 3)
-        end
-    else
-        if flyForce.bv then flyForce.bv:Destroy() flyForce.bv = nil end
-        if flyForce.bg then flyForce.bg:Destroy() flyForce.bg = nil end
-        notify("Fly", "Fly disabled", 2)
-    end
-    state.flyEnabled = enable
-end
-
-local flyToggle = Tabs.Players:AddToggle("FlyToggle", {Title = "Fly", Default = false})
-flyToggle:OnChanged(function(v) enableFly(v) end)
-
-local function setNoclip(enable)
-    state.noclipEnabled = enable
-    if enable then
-        notify("Noclip", "Noclip enabled", 3)
-    else
-        notify("Noclip", "Noclip disabled", 2)
+    local function getHRP(timeout)
         local char = LocalPlayer.Character
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then pcall(function() part.CanCollide = true end) end
-            end
+        if not char then
+            char = LocalPlayer.CharacterAdded:Wait()
+        end
+        timeout = timeout or 5
+        local ok, hrp = pcall(function() return char:WaitForChild("HumanoidRootPart", timeout) end)
+        if ok and hrp then return hrp end
+        return nil
+    end
+
+    local function createForces(hrp)
+        if not hrp or not hrp.Parent then return end
+        if not fly.bv then
+            fly.bv = Instance.new("BodyVelocity")
+            fly.bv.Name = "ATG_Fly_BV"
+            fly.bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            fly.bv.Velocity = Vector3.new(0,0,0)
+            fly.bv.P = 1250
+            fly.bv.Parent = hrp
+        else
+            fly.bv.Parent = hrp
+        end
+
+        if not fly.bg then
+            fly.bg = Instance.new("BodyGyro")
+            fly.bg.Name = "ATG_Fly_BG"
+            fly.bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+            fly.bg.CFrame = hrp.CFrame
+            fly.bg.Parent = hrp
+        else
+            fly.bg.Parent = hrp
         end
     end
-end
 
-local noclipToggle = Tabs.Players:AddToggle("NoclipToggle", {Title = "Noclip", Default = false})
-noclipToggle:OnChanged(function(v) setNoclip(v) end)
+    local function destroyForces()
+        if fly.bv then
+            pcall(function() fly.bv:Destroy() end)
+            fly.bv = nil
+        end
+        if fly.bg then
+            pcall(function() fly.bg:Destroy() end)
+            fly.bg = nil
+        end
+    end
 
--- noclip loop
-task.spawn(function()
-    while true do
-        if state.noclipEnabled then
+    local function bindFlyStep()
+        if fly.bound then return end
+        fly.bound = true
+        RunService:BindToRenderStep(bindName, Enum.RenderPriority.Character.Value + 1, function()
+            if Fluent and Fluent.Unloaded then
+                -- cleanup if UI unloaded
+                destroyForces()
+                if fly.bound then
+                    pcall(function() RunService:UnbindFromRenderStep(bindName) end)
+                    fly.bound = false
+                end
+                return
+            end
+
+            if not state.flyEnabled then return end
             local char = LocalPlayer.Character
-            if char then
-                for _,part in ipairs(char:GetDescendants()) do
-                    if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                        pcall(function() part.CanCollide = false end)
-                    end
+            if not char then return end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if not hrp or not fly.bv or not fly.bg then return end
+
+            local cam = workspace.CurrentCamera
+            if not cam then return end
+            local camCF = cam.CFrame
+
+            local moveDir = Vector3.new(0,0,0)
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir += camCF.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir -= camCF.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir -= camCF.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir += camCF.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir += Vector3.new(0,1,0) end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then moveDir -= Vector3.new(0,1,0) end
+
+            local targetVel = Vector3.new(0,0,0)
+            if moveDir.Magnitude > 0 then
+                targetVel = moveDir.Unit * fly.speed
+            end
+
+            -- smooth the velocity so it's not jittery
+            fly.bv.Velocity = fly.bv.Velocity:Lerp(targetVel, fly.smoothing)
+            -- make gyro follow camera for natural facing
+            fly.bg.CFrame = camCF
+        end)
+    end
+
+    local function unbindFlyStep()
+        if fly.bound then
+            pcall(function() RunService:UnbindFromRenderStep(bindName) end)
+            fly.bound = false
+        end
+    end
+
+    -- enableFly: create forces + bind loop
+    local function enableFly(enable)
+        state.flyEnabled = enable and true or false
+
+        if enable then
+            local hrp = getHRP(5)
+            if not hrp then
+                notify("Fly", "ไม่พบ HumanoidRootPart", 3)
+                state.flyEnabled = false
+                return
+            end
+            createForces(hrp)
+            bindFlyStep()
+            notify("Fly", "Fly enabled", 3)
+        else
+            destroyForces()
+            unbindFlyStep()
+            notify("Fly", "Fly disabled", 2)
+        end
+    end
+
+    -- Noclip: save original collisions when enabling, restore when disabling
+    local function setNoclip(enable)
+        state.noclipEnabled = enable and true or false
+        if enable then
+            -- save and disable
+            local char = LocalPlayer.Character
+            if not char then
+                notify("Noclip", "Character not ready", 2)
+                return
+            end
+            savedCanCollide = {}
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    savedCanCollide[part] = part.CanCollide
+                    pcall(function() part.CanCollide = false end)
+                end
+            end
+            notify("Noclip", "Noclip enabled", 3)
+        else
+            -- restore
+            for part, val in pairs(savedCanCollide) do
+                if part and part.Parent then
+                    pcall(function() part.CanCollide = val end)
+                end
+            end
+            savedCanCollide = {}
+            notify("Noclip", "Noclip disabled", 2)
+        end
+    end
+
+    -- Re-apply noclip and fly on respawn if toggled
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        task.wait(0.15) -- wait parts spawn
+        if state.noclipEnabled then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    pcall(function() part.CanCollide = false end)
                 end
             end
         end
-        task.wait(0.3)
-        if Fluent.Unloaded then break end
-    end
-end)
+        if state.flyEnabled then
+            -- recreate forces on new HRP
+            local hrp = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 5)
+            if hrp then
+                createForces(hrp)
+            end
+            bindFlyStep()
+        end
+    end)
 
--- -----------------------
--- Simple ESP
--- -----------------------
+    -- UI: toggle, slider, keybind
+    local flyToggle = Tabs.Players:AddToggle("FlyToggle", { Title = "Fly", Default = false })
+    flyToggle:OnChanged(function(v) enableFly(v) end)
+
+    local flySpeedSlider = Tabs.Players:AddSlider("FlySpeedSlider", {
+        Title = "Fly Speed",
+        Description = "ปรับความเร็วการบิน",
+        Default = fly.speed,
+        Min = 10,
+        Max = 350,
+        Rounding = 0,
+        Callback = function(v) fly.speed = v end
+    })
+    flySpeedSlider:SetValue(fly.speed)
+
+    local noclipToggle = Tabs.Players:AddToggle("NoclipToggle", { Title = "Noclip", Default = false })
+    noclipToggle:OnChanged(function(v) setNoclip(v) end)
+
+    Tabs.Players:AddKeybind("FlyKey", {
+        Title = "Fly Key (Toggle)",
+        Mode = "Toggle",
+        Default = "F",
+        Callback = function(val)
+            enableFly(val)
+            -- sync UI toggle
+            pcall(function() flyToggle:SetValue(val) end)
+        end
+    })
+
+    -- cleanup if Fluent unloads (safety)
+    task.spawn(function()
+        while true do
+            if Fluent and Fluent.Unloaded then
+                -- force disable
+                enableFly(false)
+                setNoclip(false)
+                break
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+
+-- Improved ESP (no size/distance sliders)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- state init (keep previous values if exist)
+state = state or {}
+state.espTable = state.espTable or {}
+state.espEnabled = state.espEnabled or false
+state.espColor = state.espColor or Color3.fromRGB(255, 50, 50)
+state.showName = (state.showName == nil) and true or state.showName
+state.showHealth = (state.showHealth == nil) and true or state.showHealth
+state.showDistance = (state.showDistance == nil) and true or state.showDistance
+
+local function getHRP(pl)
+    if not pl or not pl.Character then return nil end
+    return pl.Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHumanoid(char)
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid")
+end
+
 local function createESPForPlayer(p)
     if state.espTable[p] then return end
-    local char = p.Character
-    if not char then return end
-    local head = char:FindFirstChild("Head")
-    if not head then return end
-    local billboard = Instance.new("BillboardGui")
-    billboard.Name = "ATG_ESP"
-    billboard.Size = UDim2.new(0,100,0,40)
-    billboard.StudsOffset = Vector3.new(0,2.5,0)
-    billboard.AlwaysOnTop = true
-    billboard.Parent = head
+    local info = { billboard = nil, updateConn = nil, charConn = nil }
+    state.espTable[p] = info
 
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.fromScale(1,1)
-    label.BackgroundTransparency = 1
-    label.Text = p.Name
-    label.TextScaled = true
-    label.TextColor3 = Color3.fromRGB(255, 50, 50)
-    label.Parent = billboard
+    local function attachToCharacter(char)
+        if not state.espEnabled then return end
+        if not char or not char.Parent then return end
+        local head = char:FindFirstChild("Head")
+        if not head then return end
 
-    state.espTable[p] = billboard
+        -- cleanup old if exists
+        pcall(function()
+            if info.updateConn then info.updateConn:Disconnect() info.updateConn = nil end
+            if info.billboard then info.billboard:Destroy() info.billboard = nil end
+        end)
+
+        -- create billboard
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "ATG_ESP"
+        billboard.Size = UDim2.new(0, 200, 0, 36)
+        billboard.StudsOffset = Vector3.new(0, 2.6, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = head
+
+        local label = Instance.new("TextLabel")
+        label.Name = "ATG_ESP_Label"
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.BorderSizePixel = 0
+        label.Text = ""
+        label.TextScaled = true
+        label.Font = Enum.Font.GothamBold
+        label.TextColor3 = state.espColor
+        label.TextStrokeTransparency = 0.4
+        label.TextStrokeColor3 = Color3.new(0,0,0)
+        label.TextWrapped = true
+        label.Parent = billboard
+
+        info.billboard = billboard
+
+        -- live update (RenderStepped)
+        info.updateConn = RunService.RenderStepped:Connect(function()
+            if not state.espEnabled then return end
+            if not p or not p.Character or not p.Character.Parent then
+                label.Text = ""
+                return
+            end
+
+            local parts = {}
+            if state.showName then table.insert(parts, p.DisplayName or p.Name) end
+
+            local hum = getHumanoid(p.Character)
+            if state.showHealth and hum then
+                table.insert(parts, "HP:" .. math.floor(hum.Health))
+            end
+
+            if state.showDistance then
+                local myHRP = getHRP(LocalPlayer)
+                local theirHRP = getHRP(p)
+                if myHRP and theirHRP then
+                    local d = math.floor((myHRP.Position - theirHRP.Position).Magnitude)
+                    table.insert(parts, "[" .. d .. "m]")
+                end
+            end
+
+            label.Text = table.concat(parts, " | ")
+            label.TextColor3 = state.espColor
+        end)
+    end
+
+    -- attach if character exists now
+    if p.Character and p.Character.Parent then
+        attachToCharacter(p.Character)
+    end
+
+    -- reconnect on respawn
+    info.charConn = p.CharacterAdded:Connect(function(char)
+        task.wait(0.05)
+        if state.espEnabled then
+            attachToCharacter(char)
+        end
+    end)
 end
 
 local function removeESPForPlayer(p)
-    if state.espTable[p] then
-        pcall(function() state.espTable[p]:Destroy() end)
-        state.espTable[p] = nil
-    end
+    local info = state.espTable[p]
+    if not info then return end
+    pcall(function()
+        if info.updateConn then info.updateConn:Disconnect() info.updateConn = nil end
+        if info.charConn then info.charConn:Disconnect() info.charConn = nil end
+        if info.billboard then info.billboard:Destroy() info.billboard = nil end
+    end)
+    state.espTable[p] = nil
 end
 
-local espToggle = Tabs.Players:AddToggle("ESPToggle", {Title = "ESP", Default = false})
+-- UI: toggle/color and show options (no size/distance sliders)
+local espToggle = Tabs.ESP:AddToggle("ESPToggle", { Title = "ESP", Default = state.espEnabled })
 espToggle:OnChanged(function(v)
     state.espEnabled = v
     if not v then
         for pl,_ in pairs(state.espTable) do removeESPForPlayer(pl) end
     else
-        for _,p in ipairs(Players:GetPlayers()) do
+        for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LocalPlayer then createESPForPlayer(p) end
         end
     end
 end)
 
+local espColorPicker = Tabs.ESP:AddColorpicker("ESPColor", { Title = "ESP Color", Default = state.espColor })
+espColorPicker:OnChanged(function(c) state.espColor = c end)
+
+Tabs.ESP:AddToggle("ESP_ShowName", { Title = "Show Name", Default = state.showName }):OnChanged(function(v) state.showName = v end)
+Tabs.ESP:AddToggle("ESP_ShowHealth", { Title = "Show Health", Default = state.showHealth }):OnChanged(function(v) state.showHealth = v end)
+Tabs.ESP:AddToggle("ESP_ShowDistance", { Title = "Show Distance", Default = state.showDistance }):OnChanged(function(v) state.showDistance = v end)
+
+-- handle players joining/leaving
 Players.PlayerAdded:Connect(function(p)
-    if state.espEnabled and p ~= LocalPlayer then
-        p.CharacterAdded:Connect(function() createESPForPlayer(p) end)
-        createESPForPlayer(p)
-    end
+    if state.espEnabled and p ~= LocalPlayer then createESPForPlayer(p) end
 end)
 Players.PlayerRemoving:Connect(function(p) removeESPForPlayer(p) end)
+
+
 
 -- -----------------------
 -- Teleport to Player (Dropdown + Button)
