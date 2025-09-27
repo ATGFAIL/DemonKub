@@ -17,7 +17,7 @@ print("✅ Script Loaded in allowed map:", game.PlaceId)
 -- ถ้าแมพตรง ให้โหลด loadstring ตัวอื่น
 local function loadExtraScript()
     local success, result = pcall(function()
-        return loadstring(game:HttpGet("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Demon.lua"))()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/demon.lua"))()
     end)
     if success then
         print("✅ Extra script loaded successfully!")
