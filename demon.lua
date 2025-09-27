@@ -1,19 +1,3 @@
--- -----------------------
--- Allowed PlaceIds
--- -----------------------
-local allowedPlaces = {
-    [8069117419] = true -- ตัวอย่างแมพ 1
-}
-
--- ตรวจสอบแมพ
-if not allowedPlaces[game.PlaceId] then
-    warn("❌ Script ไม่ทำงานในแมพนี้:", game.PlaceId)
-    return
-end
-
-print("✅ Script Loaded in allowed map:", game.PlaceId)
-
-
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
