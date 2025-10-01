@@ -3,7 +3,8 @@
 -- -----------------------
 local allowedPlaces = {
     [8069117419] = "demon", -- ตัวอย่างแมพ 1
-    [126509999114328] = "99afk"  -- ตัวอย่างแมพ 2
+    [126509999114328] = "99afk",  -- ตัวอย่างแมพ 2
+    [127742093697776] = "Plants-Vs-Brainrots"
 }
 
 -- ตรวจสอบแมพ
@@ -32,4 +33,6 @@ if placeType == "demon" then
     loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/demon.lua")
 elseif placeType == "99afk" then
     loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/99afk.lua")
+elseif placeType == "Plants-Vs-Brainrots" then
+    loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Plants-Vs-Brainrots.lua")
 end
