@@ -1,9 +1,3 @@
--- ATG Hub Beta (ปรับปรุง Low Graphics + Boost FPS + Performance fixes)
--- ใส่ไฟล์นี้ทับตัวเดิมได้เลย
-
--- 注意: ฟังก์ชัน Boost FPS (Hard) จะเรียก RunService:Set3dRenderingEnabled(false)
--- ซึ่งจะปิดการเรนเดอร์ 3D ทั้งหมด (โลกจะหายไป แต่ UI ยังอยู่) ใช้ด้วยความระมัดระวัง
-
 -- Libraries
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
