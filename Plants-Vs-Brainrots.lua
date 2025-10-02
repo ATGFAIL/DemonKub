@@ -127,7 +127,7 @@ local function BuyLoop()
         end
 
         -- รอ 4 นาทีค่อยยิงรอบใหม่
-        task.wait(240)
+        task.wait(60)
     end
 end
 
@@ -166,7 +166,7 @@ local function EquipLoop()
         print("Fired EquipBestBrainrots")
         
         -- รอ 30 วินาที
-        task.wait(30)
+        task.wait(15)
     end
 end
 
@@ -250,7 +250,7 @@ local function AutoBuyLoop()
         end
 
         -- รอรอบถัดไป 4 นาที
-        local waitTime = 4 * 60
+        local waitTime = 1 * 60
         for i = 1, waitTime do
             if not Options.AutoBuyToggle.Value then break end
             task.wait(1)
@@ -626,7 +626,7 @@ local function AutoSellLoop()
         FireItemSell()
         print("[AutoSell] Fired ItemSell remote")
         -- รอรอบถัดไป 32 วิ
-        for i = 1, 32 do
+        for i = 1, 100 do
             if not Options.AutoItemSellToggle.Value then break end
             task.wait(1)
         end
@@ -914,6 +914,419 @@ do
         end
     end)
 end
+
+-- ส่วนฟังก์ชัน Toggle UI: Boost FPS / Fast Mode / Ultra Boost FPS
+-- ใส่บล็อกนี้ตรงที่มีตัวแปร Fluent, Tabs (เช่น Tabs.Main) อยู่แล้ว
+-- โค้ดนี้เป็น LocalScript (รันฝั่ง client) — ออกแบบให้ไม่ทำลายของเดิมถ้าปิดกลับคืนได้
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- เก็บสถานะเดิมเพื่อ restore เวลาปิด
+local _saved = {
+    lighting = {},
+    particles = {},      -- [instance] = originalEnabled
+    effects = {},        -- smoke/fire etc
+    decals = {},         -- [instance] = originalTransparency / TextureId
+    meshparts = {},      -- [instance] = originalTextureId
+    parts = {},          -- [instance] = {Material = ..., Color = ..., LocalTransparencyModifier = ...}
+}
+
+-- เก็บ connections ที่ต้องปิดเวลายกเลิก
+local _connections = {
+    descendantAdded = nil,
+    heartbeat = nil
+}
+
+-- ช่วยตรวจว่าจะข้ามส่วนของตัวละคร localplayer ไหม (เพื่อไม่ให้มองไม่เห็นตัวเอง)
+local function isInLocalCharacter(inst)
+    local char = LocalPlayer and LocalPlayer.Character
+    return char and inst:IsDescendantOf(char)
+end
+
+-- ฟังก์ชันช่วย set/restore โปรพอร์ตี้ ปลอดภัยด้วย pcall
+local function safeSet(obj, prop, value)
+    pcall(function() obj[prop] = value end)
+end
+
+local function safeGet(obj, prop)
+    local ok, v = pcall(function() return obj[prop] end)
+    if ok then return v end
+    return nil
+end
+
+-- =========================
+-- 1) BOOST FPS (เบสิค) : ลดโหลด effect ที่กิน fps เล็กน้อย แต่ไม่ทำให้เกมมืด/แปลกมาก
+-- ทำอะไร: ปิด particle, fire, smoke, trail, beam, global shadows
+-- =========================
+local function applyBoostFPS(enable)
+    if enable then
+        -- save lighting
+        _saved.lighting.GlobalShadows = safeGet(Lighting, "GlobalShadows")
+        _saved.lighting.Brightness = safeGet(Lighting, "Brightness")
+        _saved.lighting.Ambient = safeGet(Lighting, "Ambient")
+        _saved.lighting.OutdoorAmbient = safeGet(Lighting, "OutdoorAmbient")
+
+        -- set lighter settings
+        safeSet(Lighting, "GlobalShadows", false)
+        -- don't set brightness to 0 to avoid blindness; just keep safe default
+        safeSet(Lighting, "Brightness", (_saved.lighting.Brightness or 2) * 0.8)
+
+        -- iterate ปิด emitter/effect ที่กิน fps
+        for _, v in pairs(Workspace:GetDescendants()) do
+            if isInLocalCharacter(v) then continue end
+
+            -- ParticleEmitter / Trail / Beam
+            if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam") then
+                if _saved.particles[v] == nil then
+                    _saved.particles[v] = v.Enabled
+                end
+                safeSet(v, "Enabled", false)
+            end
+
+            -- Fire, Smoke, Sparkles
+            if v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") then
+                if _saved.effects[v] == nil then
+                    _saved.effects[v] = v.Enabled
+                end
+                safeSet(v, "Enabled", false)
+            end
+
+            -- Decals / Texture: เพิ่มกรณีแค่ทำให้โปร่ง (แต่ไม่ลบ) — ลด draw calls
+            if v:IsA("Decal") or v:IsA("Texture") then
+                if _saved.decals[v] == nil then
+                    _saved.decals[v] = {Transparency = safeGet(v, "Transparency"), Texture = safeGet(v, "Texture") or safeGet(v, "TextureId")}
+                end
+                -- ทำให้โปร่งขึ้น แต่ไม่เอาออกทั้งหมด
+                safeSet(v, "Transparency", math.clamp((v.Transparency or 0) + 0.5, 0, 1))
+            end
+        end
+
+        -- connection: ถ้ามี object ใหม่ที่ spawn เข้ามา ให้ปิด emitter ทันที
+        _connections.descendantAdded = Workspace.DescendantAdded:Connect(function(desc)
+            if isInLocalCharacter(desc) then return end
+            if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
+                if _saved.particles[desc] == nil then _saved.particles[desc] = desc.Enabled end
+                safeSet(desc, "Enabled", false)
+            end
+            if desc:IsA("Fire") or desc:IsA("Smoke") or desc:IsA("Sparkles") then
+                if _saved.effects[desc] == nil then _saved.effects[desc] = desc.Enabled end
+                safeSet(desc, "Enabled", false)
+            end
+        end)
+    else
+        -- restore lighting
+        safeSet(Lighting, "GlobalShadows", _saved.lighting.GlobalShadows)
+        safeSet(Lighting, "Brightness", _saved.lighting.Brightness)
+        safeSet(Lighting, "Ambient", _saved.lighting.Ambient)
+        safeSet(Lighting, "OutdoorAmbient", _saved.lighting.OutdoorAmbient)
+        _saved.lighting = {}
+
+        -- restore particles/effects/decals
+        for inst, orig in pairs(_saved.particles) do
+            if inst and inst.Parent then safeSet(inst, "Enabled", orig) end
+        end
+        _saved.particles = {}
+
+        for inst, orig in pairs(_saved.effects) do
+            if inst and inst.Parent then safeSet(inst, "Enabled", orig) end
+        end
+        _saved.effects = {}
+
+        for inst, orig in pairs(_saved.decals) do
+            if inst and inst.Parent then
+                pcall(function()
+                    inst.Transparency = orig.Transparency or 0
+                    if orig.Texture then
+                        -- some have Texture or TextureId
+                        if inst:IsA("Decal") then inst.Texture = orig.Texture end
+                        if inst:IsA("Texture") then inst.Texture = orig.Texture end
+                    end
+                end)
+            end
+        end
+        _saved.decals = {}
+
+        -- disconnect
+        if _connections.descendantAdded then
+            _connections.descendantAdded:Disconnect()
+            _connections.descendantAdded = nil
+        end
+    end
+end
+
+-- =========================
+-- 2) FAST MODE : ลบ/ปิดเท็กเจอร์ทั้งหมด (ทำแมพเป็นพื้นแบบเรียบ ดิน/น้ำมัน) เพื่อให้ fps ดีขึ้น
+-- ทำอะไร: เซ็ต MeshPart.TextureId = "" / Decal.Texture = "" / SurfaceAppearance maps = nil
+-- เปลี่ยน Material เป็น SmoothPlastic และเปลี่ยนสีเป็นโทนดิน (configurable)
+-- =========================
+local FAST_COLOR = Color3.fromRGB(117, 85, 61) -- สีพื้นดินแบบคร่าว ๆ (เปลี่ยนได้)
+
+local function applyFastMode(enable)
+    if enable then
+        -- เดินดูทุก instance เก็บสถานะเดิมแล้วเปลี่ยน
+        for _, v in pairs(Workspace:GetDescendants()) do
+            if isInLocalCharacter(v) then continue end
+
+            -- BasePart: เก็บ Material/Color/LocalTransparencyModifier แล้วเปลี่ยนเป็น SmoothPlastic + สีดิน
+            if v:IsA("BasePart") then
+                if _saved.parts[v] == nil then
+                    _saved.parts[v] = {
+                        Material = safeGet(v, "Material"),
+                        Color = safeGet(v, "Color"),
+                        LocalTransparencyModifier = safeGet(v, "LocalTransparencyModifier")
+                    }
+                end
+                pcall(function()
+                    v.Material = Enum.Material.SmoothPlastic
+                    v.Color = FAST_COLOR
+                    v.LocalTransparencyModifier = 0 -- ให้มองเห็น แต่เป็นสีเรียบ
+                end)
+            end
+
+            -- MeshPart: เคลียร์ texture
+            if v:IsA("MeshPart") then
+                if _saved.meshparts[v] == nil then
+                    _saved.meshparts[v] = {TextureId = safeGet(v, "TextureID")}
+                end
+                pcall(function() v.TextureID = "" end)
+            end
+
+            -- Decal/Texture: เคลียร์
+            if v:IsA("Decal") or v:IsA("Texture") then
+                if _saved.decals[v] == nil then
+                    _saved.decals[v] = {Transparency = safeGet(v, "Transparency"), Texture = safeGet(v, "Texture") or safeGet(v, "TextureId")}
+                end
+                pcall(function()
+                    if v:IsA("Decal") then v.Texture = "" end
+                    if v:IsA("Texture") then v.Texture = "" end
+                    v.Transparency = 0
+                end)
+            end
+
+            -- SurfaceAppearance: ไม่สามารถลบ map ได้ง่าย ๆ แต่เราสามารถซ่อนโดยเพิ่ม LocalTransparencyModifier ในพาร์ทที่มีมัน
+            if v:IsA("SurfaceAppearance") and v.Parent and v.Parent:IsA("BasePart") then
+                local part = v.Parent
+                if _saved.parts[part] == nil then
+                    _saved.parts[part] = {
+                        Material = safeGet(part, "Material"),
+                        Color = safeGet(part, "Color"),
+                        LocalTransparencyModifier = safeGet(part, "LocalTransparencyModifier")
+                    }
+                end
+                pcall(function()
+                    part.Material = Enum.Material.SmoothPlastic
+                    part.Color = FAST_COLOR
+                end)
+            end
+        end
+
+        -- connection: new objects ที่เพิ่มเข้ามา ให้ apply แบบเดียวกัน
+        _connections.descendantAdded = Workspace.DescendantAdded:Connect(function(desc)
+            if isInLocalCharacter(desc) then return end
+            -- ทำเหมือนข้างบน (เร็วๆ)
+            if desc:IsA("BasePart") then
+                if _saved.parts[desc] == nil then
+                    _saved.parts[desc] = {Material = safeGet(desc, "Material"), Color = safeGet(desc, "Color"), LocalTransparencyModifier = safeGet(desc, "LocalTransparencyModifier")}
+                end
+                pcall(function() desc.Material = Enum.Material.SmoothPlastic; desc.Color = FAST_COLOR end)
+            end
+            if desc:IsA("MeshPart") then
+                if _saved.meshparts[desc] == nil then _saved.meshparts[desc] = {TextureId = safeGet(desc, "TextureID")} end
+                pcall(function() desc.TextureID = "" end)
+            end
+            if desc:IsA("Decal") or desc:IsA("Texture") then
+                if _saved.decals[desc] == nil then _saved.decals[desc] = {Transparency = safeGet(desc, "Transparency"), Texture = safeGet(desc, "Texture") or safeGet(desc, "TextureId")} end
+                pcall(function() if desc:IsA("Decal") then desc.Texture = "" end; if desc:IsA("Texture") then desc.Texture = "" end; desc.Transparency = 0 end)
+            end
+        end)
+    else
+        -- restore parts
+        for inst, orig in pairs(_saved.parts) do
+            if inst and inst.Parent then
+                pcall(function()
+                    if orig.Material then inst.Material = orig.Material end
+                    if orig.Color then inst.Color = orig.Color end
+                    if orig.LocalTransparencyModifier then inst.LocalTransparencyModifier = orig.LocalTransparencyModifier end
+                end)
+            end
+        end
+        _saved.parts = {}
+
+        for inst, orig in pairs(_saved.meshparts) do
+            if inst and inst.Parent then
+                pcall(function() inst.TextureID = orig.TextureId end)
+            end
+        end
+        _saved.meshparts = {}
+
+        for inst, orig in pairs(_saved.decals) do
+            if inst and inst.Parent then
+                pcall(function()
+                    if inst:IsA("Decal") and orig.Texture then inst.Texture = orig.Texture end
+                    if inst:IsA("Texture") and orig.Texture then inst.Texture = orig.Texture end
+                    if orig.Transparency then inst.Transparency = orig.Transparency end
+                end)
+            end
+        end
+        _saved.decals = {}
+
+        if _connections.descendantAdded then
+            _connections.descendantAdded:Disconnect()
+            _connections.descendantAdded = nil
+        end
+    end
+end
+
+-- =========================
+-- 3) ULTRA BOOST FPS : ปิด 3D ทุกอย่าง (local) และแสดงหน้าจอสีดำ
+-- ทำอะไร: ซ่อนทุก BasePart (LocalTransparencyModifier = 1) ยกเว้นตัวละครของผู้เล่นท้องถิ่น (optionally)
+-- สร้าง ScreenGui สีดำทับหน้าจอ และปิด particle/effect/sky/shadows
+-- =========================
+local _ultraGui = nil
+local _ultraHiddenParts = {} -- เก็บ LocalTransparencyModifier ก่อนหน้า
+
+local function applyUltraBoost(enable)
+    if enable then
+        -- สร้าง black overlay full-screen
+        if not LocalPlayer or not LocalPlayer:FindFirstChild("PlayerGui") then
+            -- ถ้าไม่มี PlayerGui ให้รอ 1s แล้วลองอีกที
+            for i = 1, 5 do
+                task.wait(0.2)
+                if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") then break end
+            end
+        end
+
+        if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") then
+            _ultraGui = Instance.new("ScreenGui")
+            _ultraGui.Name = "UltraBoostBlackout"
+            _ultraGui.ResetOnSpawn = false
+            _ultraGui.IgnoreGuiInset = true
+            _ultraGui.Parent = LocalPlayer.PlayerGui
+
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.fromScale(1,1)
+            frame.Position = UDim2.fromScale(0,0)
+            frame.BackgroundColor3 = Color3.new(0,0,0)
+            frame.BorderSizePixel = 0
+            frame.ZIndex = 999999
+            frame.Parent = _ultraGui
+        end
+
+        -- save and hide parts (ยกเว้นตัวละคร local player เพื่อไม่ให้หาย)
+        for _, v in pairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                if isInLocalCharacter(v) then continue end
+                if _ultraHiddenParts[v] == nil then
+                    _ultraHiddenParts[v] = safeGet(v, "LocalTransparencyModifier")
+                end
+                pcall(function() v.LocalTransparencyModifier = 1 end)
+            end
+
+            -- ปิด particle / effects
+            if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") then
+                if _saved.particles[v] == nil then _saved.particles[v] = safeGet(v, "Enabled") end
+                pcall(function() v.Enabled = false end)
+            end
+        end
+
+        -- ปรับ lighting ให้มืด
+        _saved.lighting.Brightness = safeGet(Lighting, "Brightness")
+        _saved.lighting.GlobalShadows = safeGet(Lighting, "GlobalShadows")
+        safeSet(Lighting, "Brightness", 0)
+        safeSet(Lighting, "GlobalShadows", false)
+        safeSet(Lighting, "Ambient", Color3.new(0,0,0))
+        safeSet(Lighting, "OutdoorAmbient", Color3.new(0,0,0))
+
+        -- ถ้ามี object ใหม่ ให้ซ่อนทันที
+        _connections.descendantAdded = Workspace.DescendantAdded:Connect(function(desc)
+            if desc:IsA("BasePart") then
+                if isInLocalCharacter(desc) then return end
+                if _ultraHiddenParts[desc] == nil then _ultraHiddenParts[desc] = safeGet(desc, "LocalTransparencyModifier") end
+                pcall(function() desc.LocalTransparencyModifier = 1 end)
+            end
+            if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") or desc:IsA("Fire") or desc:IsA("Smoke") or desc:IsA("Sparkles") then
+                if _saved.particles[desc] == nil then _saved.particles[desc] = safeGet(desc, "Enabled") end
+                pcall(function() desc.Enabled = false end)
+            end
+        end)
+
+        -- heartbeat: บางเกมรีเซ็ต LocalTransparencyModifier บ่อย ให้เราตรวจซ้ำ
+        _connections.heartbeat = RunService.Heartbeat:Connect(function()
+            for inst, prev in pairs(_ultraHiddenParts) do
+                if inst and inst.Parent and not isInLocalCharacter(inst) then
+                    pcall(function() inst.LocalTransparencyModifier = 1 end)
+                end
+            end
+        end)
+    else
+        -- restore parts
+        for inst, orig in pairs(_ultraHiddenParts) do
+            if inst and inst.Parent then
+                pcall(function() inst.LocalTransparencyModifier = orig or 0 end)
+            end
+        end
+        _ultraHiddenParts = {}
+
+        -- restore particles
+        for inst, orig in pairs(_saved.particles) do
+            if inst and inst.Parent then pcall(function() inst.Enabled = orig end) end
+        end
+        _saved.particles = {}
+
+        -- restore lighting
+        safeSet(Lighting, "Brightness", _saved.lighting.Brightness or 2)
+        safeSet(Lighting, "GlobalShadows", _saved.lighting.GlobalShadows)
+        safeSet(Lighting, "Ambient", _saved.lighting.Ambient or Color3.new(0.5,0.5,0.5))
+        safeSet(Lighting, "OutdoorAmbient", _saved.lighting.OutdoorAmbient or Color3.new(0.5,0.5,0.5))
+        _saved.lighting = {}
+
+        -- remove overlay gui
+        if _ultraGui and _ultraGui.Parent then
+            pcall(function() _ultraGui:Destroy() end)
+            _ultraGui = nil
+        end
+
+        -- disconnect connections
+        if _connections.descendantAdded then
+            _connections.descendantAdded:Disconnect()
+            _connections.descendantAdded = nil
+        end
+        if _connections.heartbeat then
+            _connections.heartbeat:Disconnect()
+            _connections.heartbeat = nil
+        end
+    end
+end
+
+-- =========================
+-- สร้าง Toggle UI (Fluent) — ใส่บรรทัดนี้ตรงที่สร้าง Tabs.Main
+-- =========================
+-- ตัวอย่างการเชื่อมต่อกับ Fluent UI (สมมติ Tabs.Main มีอยู่แล้ว)
+local BoostToggle = Tabs.FPS:AddToggle("BoostFPS", { Title = "Boost FPS", Default = false, Description = "ปิด particle / effect เล็กน้อย + ปรับ lighting เล็กน้อย เพื่อเพิ่ม FPS" })
+BoostToggle:OnChanged(function()
+    applyBoostFPS(BoostToggle.Value)
+end)
+
+local FastToggle = Tabs.FPS:AddToggle("FastMode", { Title = "Fast Mode", Default = false, Description = "ลบเท็กซ์เจอร์และเปลี่ยนวัสดุเป็นเรียบๆ (แมพจะกลายเป็นพื้นเรียบดิน)" })
+FastToggle:OnChanged(function()
+    applyFastMode(FastToggle.Value)
+end)
+
+local UltraToggle = Tabs.FPS:AddToggle("UltraBoost", { Title = "Ultra Boost FPS", Default = false, Description = "ปิด 3D ทั้งหมดและแสดงหน้าจอดำ — สำหรับไล่ FPS สูงสุด (local only)" })
+UltraToggle:OnChanged(function()
+    applyUltraBoost(UltraToggle.Value)
+end)
+
+-- หมายเหตุสำคัญ:
+-- 1) โค้ดนี้ทำงานฝั่ง client เท่านั้น — เปลี่ยนเฉพาะสิ่งที่ผู้เล่นคนนั้นมองเห็น ไม่ส่งผลกับผู้เล่นคนอื่น (ยกเว้น server script ถูกออกแบบให้แก้)
+-- 2) ถ้าเกมมีระบบ anti-exploit หรือ server อิงสภาพแวดล้อม client บางฟังก์ชันอาจถูกรีเซ็ตโดย server หรือโดยเกมเอง
+-- 3) ถ้าต้องการให้ไม่กระทบตัวละครของผู้เล่น ให้ปรับ isInLocalCharacter เพื่อรวม/ยกเว้นตามต้องการ
+-- 4) ถ้าต้องการค่าโทนดิน/สีอื่น ปรับตัวแปร FAST_COLOR ด้านบน
 
 -- ============================
 -- Improved ESP (centralized throttled updater)
