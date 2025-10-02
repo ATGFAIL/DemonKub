@@ -492,7 +492,7 @@ local function createFollowAligns(hrp)
     alignPos.Attachment1 = attTarget
     alignPos.RigidityEnabled = false
     alignPos.MaxForce = 1e7
-    alignPos.Responsiveness = 20 -- สูงขึ้นเพื่อความนิ่ง
+    alignPos.Responsiveness = 10 -- สูงขึ้นเพื่อความนิ่ง
     alignPos.Parent = hrp
 
     local alignOri = Instance.new("AlignOrientation")
