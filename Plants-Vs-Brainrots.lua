@@ -386,7 +386,7 @@ local function AutoBuyPlatformLoop()
         end
 
         -- รอรอบถัดไป 5 นาที (ตรวจสอบ toggle ทุกวินาทีเพื่อหยุดทันทีเมื่อปิด)
-        local waitTime = 5 * 60
+        local waitTime = 1 * 20
         for i = 1, waitTime do
             if not Options.AutoBuyPlatformToggle.Value then break end
             task.wait(1)
