@@ -92,7 +92,7 @@ local AutoBuyToggle = Tabs.Auto:AddToggle("AutoBuy", {Title = "Auto Buy Seed", D
 local BuyMultiDropdown = Tabs.Auto:AddDropdown("BuyMultiDropdown", {
     Title = "Select Seed",
     Description = "Select Seed To Auto Buy",
-    Values = {"Dragon Fruit Seed", "Sunflower Seed", "Pumpkin Seed", "Strawberry Seed","Cactus Seed","Grape Seed","Eggplant Seed","Watermelon Seed","Cocotank Seed","Carnivorous Plant Seed","Mr Carrot Seed","Tomatrio Seed","Shroombino Seed"},
+    Values = {"Dragon Fruit Seed", "Sunflower Seed", "Pumpkin Seed", "Strawberry Seed","Cactus Seed","Grape Seed","Eggplant Seed","Watermelon Seed","Cocotank Seed","Carnivorous Plant Seed","Mr Carrot Seed","Tomatrio Seed","Shroombino Seed","Mango Seed"},
     Multi = true,
     Default = {"Dragon Fruit Seed"},
 })
