@@ -92,7 +92,7 @@ local AutoBuyToggle = Tabs.Auto:AddToggle("AutoBuy", {Title = "Auto Buy Seed", D
 local BuyMultiDropdown = Tabs.Auto:AddDropdown("BuyMultiDropdown", {
     Title = "Select Seed",
     Description = "Select Seed To Auto Buy",
-    Values = {"Dragon Fruit Seed", "Sunflower Seed", "Pumpkin Seed", "Strawberry Seed","Cactus Seed","Grape Seed","Eggplant Seed","Watermelon Seed","Cocotank Seed","Carnivorous Plant Seed","Mr Carrot Seed","Tomatrio Seed","Shroombino Seed","Mango Seed"},
+    Values = {"Dragon Fruit Seed", "Sunflower Seed", "Pumpkin Seed", "Strawberry Seed","Cactus Seed","Grape Seed","Eggplant Seed","Watermelon Seed","Cocotank Seed","Carnivorous Plant Seed","Mr Carrot Seed","Tomatrio Seed","Shroombino Seed"},
     Multi = true,
     Default = {"Dragon Fruit Seed"},
 })
@@ -342,16 +342,16 @@ local function getOwnedPlotFolder()
     return nil
 end
 
--- เก็บชื่อ Model ที่มี BillboardGui "PlatformPrice" ภายใน Brainrots ของโฟลเดอร์ที่เราเป็นเจ้าของ
+-- เก็บชื่อ Model ที่มี BillboardGui "PlatformPrice" ภายใน Plants ของโฟลเดอร์ที่เราเป็นเจ้าของ
 local function collectPlatformIDsFromOwnedPlot()
     local ids = {}
     local owned = getOwnedPlotFolder()
     if not owned then return ids end
 
-    local brainrots = owned:FindFirstChild("Brainrots") or owned:FindFirstChild("brainrots")
-    if not brainrots then return ids end
+    local plants = owned:FindFirstChild("Plants") or owned:FindFirstChild("plants")
+    if not plants then return ids end
 
-    for _, m in ipairs(brainrots:GetChildren()) do
+    for _, m in ipairs(plants:GetChildren()) do
         if m and m:IsA("Model") then
             local hasPrice = false
             for _, desc in ipairs(m:GetDescendants()) do
@@ -376,7 +376,7 @@ local function AutoBuyPlatformLoop()
         local platformIDs = collectPlatformIDsFromOwnedPlot()
 
         if #platformIDs == 0 then
-            warn("[AutoBuyPlatform] ไม่พบ PlatformPrice ในโฟลเดอร์ของคุณ หรือหาโฟลเดอร์ไม่เจอ. จะรอ 5 นาทีแล้วลองใหม่.")
+            warn("[AutoBuyPlatform] ไม่พบ PlatformPrice ในโฟลเดอร์ Plants ของคุณ หรือหาโฟลเดอร์ไม่เจอ.")
         else
             for _, id in ipairs(platformIDs) do
                 if not Options.AutoBuyPlatformToggle.Value then break end
@@ -406,6 +406,7 @@ PlatformToggle:OnChanged(function()
         PlatformRunning = false
     end
 end)
+
 
 -- Toggle UI to send ChangeSetting remote (Graphics on/off)
 local ChangeSettingToggle = Tabs.FPS:AddToggle("ChangeSettingToggle", {Title = "Remove Effect", Default = false})
