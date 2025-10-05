@@ -1,10 +1,3 @@
--- ATG Hub Beta (ปรับปรุง Low Graphics + Boost FPS + Performance fixes)
--- ใส่ไฟล์นี้ทับตัวเดิมได้เลย
-
--- 注意: ฟังก์ชัน Boost FPS (Hard) จะเรียก RunService:Set3dRenderingEnabled(false)
--- ซึ่งจะปิดการเรนเดอร์ 3D ทั้งหมด (โลกจะหายไป แต่ UI ยังอยู่) ใช้ด้วยความระมัดระวัง
-
--- Libraries
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
@@ -18,13 +11,19 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
+local screen = workspace.CurrentCamera.ViewportSize
+local width = math.clamp(screen.X * 0.6, 400, 600)   -- อย่างน้อย 400px มากสุด 600px
+local height = math.clamp(screen.Y * 0.6, 300, 500) -- อย่างน้อย 300px มากสุด 500px
+
+
+
 
 -- Window
 local Window = Fluent:CreateWindow({
     Title = "ATG Hub Beta",
     SubTitle = "by ATGFAIL",
     TabWidth = 160,
-    Size = UDim2.fromOffset(580, 460),
+    Size = UDim2.fromOffset(width, height),
     Acrylic = true,
     Theme = "Dark",
     MinimizeKey = Enum.KeyCode.LeftControl
@@ -1532,9 +1531,6 @@ do
                     pcall(function() vu:Button2Down(Vector2.new(0,0)); task.wait(1); vu:Button2Up(Vector2.new(0,0)) end)
                 end)
             end
-            notify("Anti-AFK", "Anti-AFK enabled", 3)
-        else
-            notify("Anti-AFK", "Anti-AFK disabled (client may still have other handlers)", 3)
         end
     end
 
@@ -1638,7 +1634,7 @@ SaveManager:LoadAutoloadConfig()
 
 Window:SelectTab(1)
 
-Fluent:Notify({ Title = "Fluent", Content = "The script has been loaded.", Duration = 8 })
+Fluent:Notify({ Title = "ATG Hub", Content = "The script has been loaded.", Duration = 8 })
 
 -- Cleanup on unload
 task.spawn(function()
@@ -1651,3 +1647,4 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
