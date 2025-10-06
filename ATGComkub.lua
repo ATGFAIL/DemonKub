@@ -4,7 +4,8 @@
 local allowedPlaces = {
     [8069117419] = "demon", -- ตัวอย่างแมพ 1
     [127742093697776] = "Plants-Vs-Brainrots",
-    [96114180925459] = "Lasso-Animals"
+    [96114180925459] = "Lasso-Animals",
+    [135880624242201] = "Cut-Tree"
 }
 
 -- ตรวจสอบแมพ
@@ -35,4 +36,6 @@ elseif placeType == "Plants-Vs-Brainrots" then
     loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Plants-Vs-Brainrots.lua")
 elseif placeType == "Lasso-Animals" then
     loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Lasso-Animals.lua")
+elseif placeType == "Cut-Tree" then
+    loadExtraScript("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua")
 end
