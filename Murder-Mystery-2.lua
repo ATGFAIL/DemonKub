@@ -4,13 +4,6 @@ local ok, WindUI = pcall(function()
 end)
 if not ok or not WindUI then return warn("WindUI load failed") end
 
-WindUI:Notify({
-    Title = "Load Successful",
-    Content = "Join Discord For More Scripts/Updates",
-    Duration = 3,
-    Icon = "swords",
-})
-
 -- Window
 local Window = WindUI:CreateWindow({
     Title = "ATG Hub",
@@ -33,7 +26,6 @@ Window:EditOpenButton({
 })
 
 -- Tabs
-local InfoTab = Window:Tab({ Title = "Info", Icon = "info" })
 local ESP_Tab = Window:Tab({ Title = "ESP", Icon = "app-window" })
 local TP_Tab  = Window:Tab({ Title = "TP", Icon = "zap" })
 local Local_Tab = Window:Tab({ Title = "Local Player", Icon = "user" })
