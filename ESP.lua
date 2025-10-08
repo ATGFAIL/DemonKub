@@ -1,310 +1,252 @@
--- Optimized ESP (Single update loop, pooling, UI hooks, save/load)
+-- ATG ESP (optimized)
+-- หลักการสำคัญ:
+-- 1) ใช้ centralized update loop (Heartbeat) ที่ throttle ด้วย updateInterval (ไม่สร้าง RenderStepped per-player)
+-- 2) Culling: ระยะ, อยู่ในหน้าจอ, (optionally) raycast สำหรับ visibility แบบ throttled
+-- 3) Object pooling สำหรับ BillboardGui และ Highlight เพื่อลดการสร้าง/ทำลายบ่อย ๆ
+-- 4) เก็บ state/config ที่ UI สามารถแก้ได้ และมี Reset/Presets
+-- 5) เช็ค cleanup เมื่อ PlayerLeft หรือ Unload
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local HttpService = game:GetService("HttpService")
-local Workspace = game:GetService("Workspace")
+local UIS = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
+local Camera = workspace.CurrentCamera
 
--- Detect Drawing API if available (exploit env). If your safeNewDrawing exists, use it.
-local hasDrawing = (typeof(Drawing) == "table") or (type(safeNewDrawing) == "function")
-local useSafeNewDrawing = (type(safeNewDrawing) == "function")
-
--- Defaults
-local DEFAULT_CONFIG = {
+-- state + config (เก็บค่า default ที่เหมาะสม)
+local state = state or {} -- บันทึกข้ามสคริปต์ถ้ามี
+state.espTable = state.espTable or {} -- map userId -> info
+state.pools = state.pools or {billboards = {}, highlights = {}}
+state.config = state.config or {
     enabled = false,
-    renderMode = "2D", -- "2D" (Drawing) or "Billboard"
-    updateRate = 10, -- updates per second
-    maxDistance = 250, -- meters
+    updateRate = 10,             -- updates per second (10 => 0.1s interval)
+    maxDistance = 250,           -- เมตร ในเกม units
+    maxVisibleCount = 60,        -- limit จำนวน ESP แสดงพร้อมกัน (ป้องกัน overload)
     showName = true,
     showHealth = true,
     showDistance = true,
-    textSize = 16,
     espColor = Color3.fromRGB(255, 50, 50),
-    boxThickness = 1,
-    labelOffsetY = 2.6, -- studs (for billboard)
-    highlightEnabled = true,
-    highlightFillTransparency = 0.7,
-    highlightOutlineTransparency = 0.4,
-    occlusionCheck = false, -- raycast check (may be expensive if enabled)
-    hideIfCentered = false, -- if true, hide ESP when near screen center (reduce obstruction)
-    hideCenterRadius = 0.12, -- fraction of screen (0..0.5)
+    labelScale = 1,              -- scale ของข้อความ (TextScaled true จะอิงขนาด parent)
+    alwaysOnTop = false,         -- BillboardGui.AlwaysOnTop (ถ้า true จะไม่ถูกบัง)
+    smartHideCenter = true,      -- ซ่อน label ถ้ามันบังหน้าจอกลาง (ปรับได้)
+    centerHideRadius = 0.12,     -- % screen radius จาก center ที่จะซ่อน (0.12 => 12%)
+    raycastOcclusion = false,    -- ถ้าต้องการเพิ่ม check line-of-sight (ถ้าเปิดจะทำงานแบบ throttled)
+    raycastInterval = 0.6,       -- วินาทีต่อการ raycast ต่อตัว (ถ้าเปิด)
+    highlightEnabled = false,
+    highlightFillTransparency = 0.6,
+    highlightOutlineTransparency = 0.6,
+    teamCheck = true,            -- ไม่แสดง ESP ของเพื่อนร่วมทีม (ถ้าเกมมีทีม)
+    ignoreLocalPlayer = true,    -- ไม่แสดงตัวเอง
 }
 
--- Config persistence file name (for exploit runners)
-local CONFIG_FILENAME = "atg_esp_config.json"
+-- pooling helpers
+local function borrowBillboard()
+    local pool = state.pools.billboards
+    if #pool > 0 then
+        return table.remove(pool)
+    else
+        -- สร้างใหม่
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "ATG_ESP"
+        billboard.Size = UDim2.new(0, 150, 0, 30)
+        billboard.StudsOffset = Vector3.new(0, 2.6, 0)
+        billboard.Adornee = nil
+        billboard.AlwaysOnTop = state.config.alwaysOnTop
+        billboard.ResetOnSpawn = false
 
--- state
-local state = {
-    config = DEFAULT_CONFIG,
-    espTable = {}, -- [player] = info
-    running = false,
-}
+        local label = Instance.new("TextLabel")
+        label.Name = "ATG_ESP_Label"
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.BorderSizePixel = 0
+        label.Text = ""
+        label.TextScaled = true
+        label.Font = Enum.Font.GothamBold
+        label.TextStrokeTransparency = 0.4
+        label.TextStrokeColor3 = Color3.new(0,0,0)
+        label.TextWrapped = true
+        label.Parent = billboard
 
--- helper: deep copy table
-local function deepCopy(t)
-    local nt = {}
-    for k,v in pairs(t) do
-        if type(v) == "table" then nt[k] = deepCopy(v) else nt[k] = v end
+        return {billboard = billboard, label = label}
     end
-    return nt
 end
 
--- Load config (supports writefile/readfile in exploit env; falls back to _G)
-local function SaveConfig()
-    local ok, err = pcall(function()
-        local json = HttpService:JSONEncode(state.config)
-        if writefile then
-            writefile(CONFIG_FILENAME, json)
-        else
-            _G.ATG_ESP_SAVED_CONFIG = json
-        end
+local function returnBillboard(obj)
+    if not obj or not obj.billboard then return end
+    pcall(function()
+        obj.label.Text = ""
+        obj.billboard.Parent = nil
+        obj.billboard.Adornee = nil
     end)
-    if not ok then warn("ESP: SaveConfig failed:", err) end
+    table.insert(state.pools.billboards, obj)
 end
 
-local function LoadConfig()
-    local ok, content = pcall(function()
-        if readfile and isfile and isfile(CONFIG_FILENAME) then
-            return readfile(CONFIG_FILENAME)
-        else
-            return _G and _G.ATG_ESP_SAVED_CONFIG
-        end
+local function borrowHighlight()
+    local pool = state.pools.highlights
+    if #pool > 0 then
+        return table.remove(pool)
+    else
+        local hl = Instance.new("Highlight")
+        hl.Name = "ATG_ESP_Highlight"
+        hl.Enabled = false
+        return hl
+    end
+end
+
+local function returnHighlight(hl)
+    if not hl then return end
+    pcall(function()
+        hl.Enabled = false
+        hl.Adornee = nil
+        hl.Parent = nil
     end)
-    if ok and content then
-        local suc, decoded = pcall(function() return HttpService:JSONDecode(content) end)
-        if suc and type(decoded) == "table" then
-            -- merge with defaults
-            local merged = deepCopy(DEFAULT_CONFIG)
-            for k,v in pairs(decoded) do merged[k] = v end
-            state.config = merged
-            return
-        end
+    table.insert(state.pools.highlights, hl)
+end
+
+-- helper utilities
+local function getHRP(player)
+    if not player or not player.Character then return nil end
+    return player.Character:FindFirstChild("HumanoidRootPart")
+end
+local function getHumanoid(char)
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid")
+end
+
+local function isSameTeam(a,b)
+    -- best-effort: ถ้าตัวเกมมี Team, compare Team property
+    if not a or not b then return false end
+    if a.Team and b.Team and a.Team == b.Team then
+        return true
     end
-    -- fallback default
-    state.config = deepCopy(DEFAULT_CONFIG)
+    return false
 end
 
--- Reset config to defaults
-local function ResetConfig()
-    state.config = deepCopy(DEFAULT_CONFIG)
-    SaveConfig()
-end
-
--- Utility: safe property set to avoid expensive updates if not necessary
-local function safeSet(obj, prop, value)
-    if not obj then return end
-    if obj[prop] ~= value then
-        obj[prop] = value
-    end
-end
-
--- Create or recycle ESP visuals for a player
-local function createESPForPlayer(player)
-    if not player or player == LocalPlayer then return end
-    if state.espTable[player] then return end
+-- create / remove logic (doesn't connect RenderStepped per-player)
+local function ensureEntryForPlayer(p)
+    if not p then return end
+    local uid = p.UserId
+    if state.espTable[uid] then return state.espTable[uid] end
 
     local info = {
-        player = player,
-        billboard = nil, -- BillboardGui (if used)
-        label = nil,
-        drawings = nil, -- {box, text, line}
-        highlight = nil,
+        player = p,
+        billboardObj = nil, -- {billboard,label}
+        highlightObj = nil, -- Highlight instance
         lastVisible = false,
-        lastText = "",
-        lastColor = nil,
-        charConn = nil,
+        lastScreenPos = Vector2.new(0,0),
+        lastDistance = math.huge,
+        lastRaycast = -999,
+        connected = true, -- if we have CharacterAdded connection
+        charConn = nil
     }
-    state.espTable[player] = info
 
-    -- cleanup function
-    local function cleanup()
-        pcall(function()
-            if info.billboard then info.billboard:Destroy() info.billboard = nil end
-            if info.label then info.label:Destroy() info.label = nil end
-            if info.drawings then
-                for _,d in pairs(info.drawings) do
-                    if d and type(d.Destroy) == "function" then
-                        d:Remove() -- Drawing API uses Remove()
-                    elseif d and type(d) == "userdata" then
-                        -- fallback
-                        pcall(function() d:Remove() end)
-                    end
-                end
-                info.drawings = nil
+    -- connect character added to reattach Adornee when respawn
+    info.charConn = p.CharacterAdded:Connect(function(char)
+        -- small delay ให้เวลา Head สร้าง
+        task.wait(0.05)
+        if info.billboardObj and info.billboardObj.billboard then
+            local head = char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
+            if head then
+                info.billboardObj.billboard.Adornee = head
             end
-            if info.highlight then
-                info.highlight:Destroy()
-                info.highlight = nil
-            end
-            if info.charConn then info.charConn:Disconnect() info.charConn = nil end
-        end)
-        state.espTable[player] = nil
-    end
-
-    -- create highlight object (but don't enable Adornee until char exists)
-    if state.config.highlightEnabled then
-        local ok, h = pcall(function()
-            local hl = Instance.new("Highlight")
-            hl.Name = "ATG_ESP_Highlight"
-            hl.FillColor = state.config.espColor
-            hl.FillTransparency = state.config.highlightFillTransparency
-            hl.OutlineTransparency = state.config.highlightOutlineTransparency
-            hl.Enabled = false
-            hl.Parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui") -- safe parent
-            return hl
-        end)
-        if ok and h then info.highlight = h end
-    end
-
-    -- create billboard if mode is Billboard
-    if state.config.renderMode == "Billboard" then
-        local function createBillboard(char)
-            if not char or not char.Parent then return end
-            local head = char:FindFirstChild("Head")
-            if not head then return end
-
-            pcall(function()
-                if info.billboard then info.billboard:Destroy() info.billboard = nil end
-                local bb = Instance.new("BillboardGui")
-                bb.Name = "ATG_ESP_BB"
-                bb.Size = UDim2.new(0, 200, 0, 36)
-                bb.AlwaysOnTop = true
-                bb.StudsOffset = Vector3.new(0, state.config.labelOffsetY, 0)
-                bb.Adornee = head
-                bb.Parent = head
-
-                local label = Instance.new("TextLabel")
-                label.Name = "ATG_ESP_LABEL"
-                label.Size = UDim2.fromScale(1,1)
-                label.BackgroundTransparency = 1
-                label.TextScaled = true
-                label.Font = Enum.Font.GothamBold
-                label.Text = ""
-                label.TextColor3 = state.config.espColor
-                label.TextStrokeTransparency = 0.4
-                label.Parent = bb
-
-                info.billboard = bb
-                info.label = label
-            end)
         end
-
-        -- attach to existing character
-        if player.Character and player.Character.Parent then
-            createBillboard(player.Character)
-        end
-        -- reconnect on respawn
-        info.charConn = player.CharacterAdded:Connect(function(char)
-            task.wait(0.05)
-            if state.config.renderMode == "Billboard" then createBillboard(char) end
-            if info.highlight and state.config.highlightEnabled then
-                pcall(function() info.highlight.Adornee = char end)
-                info.highlight.Enabled = state.config.enabled
-            end
-        end)
-    else
-        -- Drawing mode (2D). Create drawing objects now (will be positioned each update)
-        if hasDrawing then
-            local ok, d = pcall(function()
-                local box, nameText
-                if useSafeNewDrawing then
-                    box = safeNewDrawing("Square", {Thickness = state.config.boxThickness, Filled = false, Visible = false})
-                    nameText = safeNewDrawing("Text", {Size = state.config.textSize, Center = true, Outline = true, Visible = false, Text = player.Name})
-                else
-                    box = Drawing.new("Square")
-                    box.Thickness = state.config.boxThickness
-                    box.Filled = false
-                    box.Visible = false
-                    nameText = Drawing.new("Text")
-                    nameText.Size = state.config.textSize
-                    nameText.Center = true
-                    nameText.Outline = true
-                    nameText.Visible = false
-                    nameText.Text = player.Name
-                end
-                return {box = box, text = nameText}
-            end)
-            if ok and d then info.drawings = d end
-        end
-        -- connect charAdded to set highlight adornee
-        info.charConn = player.CharacterAdded:Connect(function(char)
-            task.wait(0.05)
-            if info.highlight and state.config.highlightEnabled then
-                pcall(function() info.highlight.Adornee = char end)
-                info.highlight.Enabled = state.config.enabled
-            end
-        end)
-    end
-
-    -- PlayerRemoving cleanup hook (in case this function called before global hook)
-    player.AncestryChanged:Connect(function()
-        if not player.Parent then
-            cleanup()
+        if info.highlightObj then
+            info.highlightObj.Adornee = char
         end
     end)
 
-    -- expose cleanup in info for external use
-    info.cleanup = cleanup
+    state.espTable[uid] = info
+    return info
 end
 
-local function removeESPForPlayer(player)
-    local info = state.espTable[player]
+local function cleanupEntry(uid)
+    local info = state.espTable[uid]
     if not info then return end
     pcall(function()
-        if info.cleanup then info.cleanup() end
-    end)
-end
-
--- Global players hooks
-Players.PlayerAdded:Connect(function(p)
-    -- Small delay to allow Player object to fully init
-    task.defer(function()
-        if state.config.enabled and p ~= LocalPlayer then
-            createESPForPlayer(p)
+        if info.charConn then info.charConn:Disconnect() info.charConn = nil end
+        if info.billboardObj then
+            returnBillboard(info.billboardObj)
+            info.billboardObj = nil
+        end
+        if info.highlightObj then
+            returnHighlight(info.highlightObj)
+            info.highlightObj = nil
         end
     end)
-end)
-Players.PlayerRemoving:Connect(function(p)
-    removeESPForPlayer(p)
-end)
+    state.espTable[uid] = nil
+end
 
--- initial spawn: create entries for existing players
-local function initPlayers()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and state.config.enabled then
-            createESPForPlayer(p)
+-- visibility check (distance + on-screen + optional raycast)
+local function shouldShowFor(info)
+    if not info or not info.player then return false end
+    local p = info.player
+    if not p.Character or not p.Character.Parent then return false end
+    if state.config.ignoreLocalPlayer and p == LocalPlayer then return false end
+    if state.config.teamCheck and isSameTeam(p, LocalPlayer) then return false end
+
+    local myHRP = getHRP(LocalPlayer)
+    local theirHRP = getHRP(p)
+    if not myHRP or not theirHRP then return false end
+
+    local dist = (myHRP.Position - theirHRP.Position).Magnitude
+    if dist > state.config.maxDistance then
+        return false
+    end
+
+    -- screen check
+    local head = p.Character:FindFirstChild("Head") or p.Character:FindFirstChild("UpperTorso") or theirHRP
+    if not head then return false end
+    local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+    if not onScreen then return false end
+
+    -- smartCenter hide: ถ้า label อยู่ใกล้หน้าจอกลางมากเกินไป
+    if state.config.smartHideCenter then
+        local sx = screenPos.X / Camera.ViewportSize.X
+        local sy = screenPos.Y / Camera.ViewportSize.Y
+        local cx = 0.5
+        local cy = 0.5
+        local dx = sx - cx
+        local dy = sy - cy
+        local d = math.sqrt(dx*dx + dy*dy)
+        if d < state.config.centerHideRadius then
+            return false
         end
     end
+
+    -- optional throttled raycast occlusion (ถ้าเปิด)
+    if state.config.raycastOcclusion then
+        local now = tick()
+        if now - info.lastRaycast >= state.config.raycastInterval then
+            info.lastRaycast = now
+            local origin = Camera.CFrame.Position
+            local direction = (head.Position - origin)
+            local rayParams = RaycastParams.new()
+            rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+            local r = workspace:Raycast(origin, direction, rayParams)
+            -- ถ้าวัตถุติดกันและไม่ใช่ตัวเป้าหมาย แปลว่าไม่ visible
+            if r and r.Instance and not r.Instance:IsDescendantOf(p.Character) then
+                return false
+            end
+        else
+            -- ใช้ last known result (ไม่ทำ raycast ทุก frame)
+            -- ถ้าไม่มี last result ให้อนุรักษ์ default true
+        end
+    end
+
+    return true
 end
 
--- Utility: check if part is visible (occlusion) - optional and may be expensive if many checks
-local function isVisibleFromCamera(worldPos)
-    if not state.config.occlusionCheck then return true end
-    local origin = Camera.CFrame.Position
-    local direction = (worldPos - origin)
-    local rayParams = RaycastParams.new()
-    rayParams.FilterDescendantsInstances = {LocalPlayer.Character or Workspace}
-    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-    rayParams.IgnoreWater = true
-    local result = Workspace:Raycast(origin, direction.Unit * math.clamp(direction.Magnitude, 0, 1000), rayParams)
-    if not result then return true end
-    -- if hit point is very close to worldPos, consider visible
-    local hitPos = result.Position
-    return (hitPos - worldPos).Magnitude < 0.5
-end
-
--- Build label text from toggles
-local function buildLabelText(player)
+-- update label content (only when changed)
+local function buildLabelText(p)
     local parts = {}
-    if state.config.showName then table.insert(parts, player.DisplayName or player.Name) end
-    if state.config.showHealth then
-        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        if hum then table.insert(parts, "HP:" .. tostring(math.floor(hum.Health))) end
+    if state.config.showName then table.insert(parts, p.DisplayName or p.Name) end
+    local hum = getHumanoid(p.Character)
+    if state.config.showHealth and hum then
+        table.insert(parts, "HP:" .. math.floor(hum.Health))
     end
     if state.config.showDistance then
-        local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local theirHRP = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local myHRP = getHRP(LocalPlayer)
+        local theirHRP = getHRP(p)
         if myHRP and theirHRP then
             local d = math.floor((myHRP.Position - theirHRP.Position).Magnitude)
             table.insert(parts, "[" .. d .. "m]")
@@ -313,183 +255,217 @@ local function buildLabelText(player)
     return table.concat(parts, " | ")
 end
 
--- Single update loop (throttled by config.updateRate)
-local accum = 0
-local function startLoop()
-    if state.running then return end
-    state.running = true
-    accum = 0
-    RunService.Heartbeat:Connect(function(dt)
-        if not state.running then return end
-        accum = accum + dt
-        local rate = math.clamp(tonumber(state.config.updateRate) or DEFAULT_CONFIG.updateRate, 1, 60)
-        local interval = 1 / rate
-        if accum < interval then return end
-        accum = 0
+-- main centralized updater (throttled)
+local accumulator = 0
+local updateInterval = 1 / math.max(1, state.config.updateRate) -- secs
+local lastVisibleCount = 0
 
-        -- iterate players
-        local camCFrame = Camera.CFrame
-        local viewportSize = Camera.ViewportSize
-        for player, info in pairs(state.espTable) do
-            local visible = false
-            local labelText = ""
-            if not player or not player.Character or not player.Character.Parent then
-                -- ensure visuals hidden
-                if info.label then safeSet(info.label, "Text", "") end
-                if info.drawings then
-                    if info.drawings.box then info.drawings.box.Visible = false end
-                    if info.drawings.text then info.drawings.text.Visible = false end
-                end
-                if info.billboard then info.billboard.Enabled = false end
-                if info.highlight then info.highlight.Enabled = false end
-            else
-                local hrp = player.Character:FindFirstChild("HumanoidRootPart") or player.Character:FindFirstChild("Head")
-                if hrp then
-                    local dist = (Camera.CFrame.Position - hrp.Position).Magnitude
-                    if dist <= state.config.maxDistance then
-                        local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, state.config.labelOffsetY, 0))
-                        -- hide if offscreen or behind camera
-                        if onScreen then
-                            -- optional: hide when it's near center to avoid obstruction
-                            local hideCenter = false
-                            if state.config.hideIfCentered then
-                                local cx = screenPos.X / viewportSize.X - 0.5
-                                local cy = screenPos.Y / viewportSize.Y - 0.5
-                                local radius = state.config.hideCenterRadius
-                                hideCenter = (math.abs(cx) < radius and math.abs(cy) < radius)
-                            end
+local function performUpdate(dt)
+    accumulator = accumulator + dt
+    updateInterval = 1 / math.max(1, state.config.updateRate)
+    if accumulator < updateInterval then return end
+    accumulator = accumulator - updateInterval
 
-                            if not hideCenter then
-                                -- occlusion check (optional)
-                                if isVisibleFromCamera(hrp.Position) then
-                                    visible = true
-                                end
-                            end
-                        end
-                    end
-                end
-                labelText = buildLabelText(player)
+    -- gather players (and ensure entries exist)
+    local visibleCount = 0
+    local players = Players:GetPlayers()
+    for _, p in ipairs(players) do
+        if p ~= LocalPlayer or not state.config.ignoreLocalPlayer then
+            ensureEntryForPlayer(p)
+        end
+    end
+
+    -- iterate entries and decide show/hide
+    for uid, info in pairs(state.espTable) do
+        local p = info.player
+        if not p or not p.Parent then
+            cleanupEntry(uid)
+        else
+            local canShow = state.config.enabled and shouldShowFor(info)
+            if canShow and visibleCount >= state.config.maxVisibleCount then
+                -- เกิน limit: ซ่อนเพื่อความเสถียร
+                canShow = false
             end
 
-            -- apply visuals based on renderMode
-            if state.config.renderMode == "Billboard" then
-                if info.billboard and info.label then
-                    info.billboard.Enabled = visible and state.config.enabled
-                    if visible and state.config.enabled then
-                        if info.label.Text ~= labelText then info.label.Text = labelText end
-                        if info.label.TextColor3 ~= state.config.espColor then info.label.TextColor3 = state.config.espColor end
-                    end
-                end
-            else
-                if info.drawings then
-                    -- Drawing objects expect 2D coords
-                    if visible and state.config.enabled then
-                        local hrp = player.Character and (player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart"))
-                        if hrp then
-                            local pos3 = hrp.Position + Vector3.new(0, state.config.labelOffsetY, 0)
-                            local screenPos, onScreen = Camera:WorldToViewportPoint(pos3)
-                            if onScreen then
-                                local x = screenPos.X
-                                local y = screenPos.Y
-                                local t = info.drawings.text
-                                local b = info.drawings.box
-                                if t then
-                                    t.Text = labelText
-                                    t.Position = Vector2.new(x, y - (state.config.textSize))
-                                    t.Color = state.config.espColor
-                                    t.Size = state.config.textSize
-                                    t.Visible = true
-                                end
-                                if b then
-                                    -- small box around head (approx)
-                                    local size = state.config.boxThickness * 20
-                                    b.Position = Vector2.new(x - size/2, y - size/2)
-                                    b.Size = Vector2.new(size, size)
-                                    b.Color = state.config.espColor
-                                    b.Visible = true
-                                end
-                            else
-                                -- offscreen
-                                if info.drawings.text then info.drawings.text.Visible = false end
-                                if info.drawings.box then info.drawings.box.Visible = false end
-                            end
-                        end
+            if canShow then
+                visibleCount = visibleCount + 1
+                -- ensure billboard exists
+                if not info.billboardObj then
+                    local obj = borrowBillboard()
+                    local head = p.Character and (p.Character:FindFirstChild("Head") or p.Character:FindFirstChild("UpperTorso") or getHRP(p))
+                    if head then
+                        obj.billboard.Parent = head
+                        obj.billboard.Adornee = head
+                        obj.billboard.AlwaysOnTop = state.config.alwaysOnTop
+                        info.billboardObj = obj
                     else
-                        if info.drawings.text then info.drawings.text.Visible = false end
-                        if info.drawings.box then info.drawings.box.Visible = false end
+                        returnBillboard(obj)
+                        info.billboardObj = nil
                     end
                 end
-            end
 
-            -- highlight enable/disable
-            if info.highlight then
-                info.highlight.Enabled = visible and state.config.highlightEnabled and state.config.enabled
-                -- update color/transparency if changed
-                safeSet(info.highlight, "FillColor", state.config.espColor)
-                safeSet(info.highlight, "FillTransparency", state.config.highlightFillTransparency)
-                safeSet(info.highlight, "OutlineTransparency", state.config.highlightOutlineTransparency)
+                -- ensure highlight if enabled
+                if state.config.highlightEnabled and not info.highlightObj then
+                    local hl = borrowHighlight()
+                    hl.Adornee = p.Character
+                    hl.Parent = p.Character
+                    hl.Enabled = true
+                    hl.FillColor = state.config.espColor
+                    hl.FillTransparency = state.config.highlightFillTransparency
+                    hl.OutlineColor = state.config.espColor
+                    hl.OutlineTransparency = state.config.highlightOutlineTransparency
+                    info.highlightObj = hl
+                elseif (not state.config.highlightEnabled) and info.highlightObj then
+                    returnHighlight(info.highlightObj)
+                    info.highlightObj = nil
+                end
+
+                -- update label text & color only when changed
+                if info.billboardObj and info.billboardObj.label then
+                    local txt = buildLabelText(p)
+                    if info.billboardObj.label.Text ~= txt then
+                        info.billboardObj.label.Text = txt
+                    end
+                    -- color
+                    if info.billboardObj.label.TextColor3 ~= state.config.espColor then
+                        info.billboardObj.label.TextColor3 = state.config.espColor
+                    end
+                    -- scale / Size adjustments
+                    info.billboardObj.billboard.Size = UDim2.new(0, math.clamp(120 + (#txt * 4), 100, 280), 0, math.clamp(16 * state.config.labelScale, 12, 48))
+                end
+
+            else
+                -- hide (recycle billboard/highlight)
+                if info.billboardObj then
+                    returnBillboard(info.billboardObj)
+                    info.billboardObj = nil
+                end
+                if info.highlightObj then
+                    returnHighlight(info.highlightObj)
+                    info.highlightObj = nil
+                end
             end
         end
-    end)
+    end
+
+    lastVisibleCount = visibleCount
 end
 
--- Start/Stop ESP
-local function enableESP(val)
-    state.config.enabled = val and true or false
-    if state.config.enabled then
-        -- create for existing players
-        initPlayers()
-        -- enable highlights adornee for those with characters
-        for p, info in pairs(state.espTable) do
-            if info.highlight and p.Character then
-                pcall(function() info.highlight.Adornee = p.Character end)
+-- main connection (unbind old if exists)
+if state._espHeartbeatConn then
+    pcall(function() state._espHeartbeatConn:Disconnect() end)
+    state._espHeartbeatConn = nil
+end
+
+state._espHeartbeatConn = RunService.Heartbeat:Connect(performUpdate)
+
+-- Player join/leave cleanup
+Players.PlayerRemoving:Connect(function(p)
+    if not p then return end
+    cleanupEntry(p.UserId)
+end)
+
+-- UI integration: (ใช้ API ที่ให้มาในตัวอย่าง Tabs.*)
+-- ฟังก์ชัน applyConfig เพื่อ sync ค่าจาก UI ไป state.config
+local function applyConfigFromUI(uiConfig)
+    for k,v in pairs(uiConfig) do
+        state.config[k] = v
+    end
+end
+
+-- Exposed functions for the UI to hook into:
+local ESP_API = {}
+
+function ESP_API.ToggleEnabled(v)
+    state.config.enabled = v
+    if not v then
+        -- immediate cleanup of visuals but keep entries
+        for uid,info in pairs(state.espTable) do
+            if info.billboardObj then
+                returnBillboard(info.billboardObj)
+                info.billboardObj = nil
             end
-        end
-        startLoop()
-    else
-        -- disable visuals but keep objects (so re-enabling is fast)
-        for p, info in pairs(state.espTable) do
-            if info.billboard then info.billboard.Enabled = false end
-            if info.drawings then
-                if info.drawings.text then info.drawings.text.Visible = false end
-                if info.drawings.box then info.drawings.box.Visible = false end
+            if info.highlightObj then
+                returnHighlight(info.highlightObj)
+                info.highlightObj = nil
             end
-            if info.highlight then info.highlight.Enabled = false end
         end
     end
 end
 
--- Expose Save/Load/Reset functions and UI binding examples
--- UI integration (example): hook your Tabs.ESP UI elements to these functions
--- Example usage with provided UI API:
---   local espToggle = Tabs.ESP:AddToggle("ESPToggle", { Title = "ESP", Default = state.config.enabled })
---   espToggle:OnChanged(function(v) enableESP(v) SaveConfig() end)
---   local rateSlider = Tabs.ESP:AddSlider("ESP_UpdateRate", { Title="Update Rate", Default = state.config.updateRate, Min = 1, Max = 60, Rounding = 1 })
---   rateSlider:OnChanged(function(v) state.config.updateRate = v SaveConfig() end)
---   local distSlider = Tabs.ESP:AddSlider("ESP_MaxDist", { Title="Max Distance", Default = state.config.maxDistance, Min = 50, Max = 1000, Rounding = 1 })
---   distSlider:OnChanged(function(v) state.config.maxDistance = v SaveConfig() end)
---   local colorPicker = Tabs.ESP:AddColorpicker("ESP_Color", { Title = "ESP Color", Default = state.config.espColor })
---   colorPicker:OnChanged(function(c) state.config.espColor = c SaveConfig() end)
---   Tabs.ESP:AddToggle("ESP_Highlight", { Title = "Highlight", Default = state.config.highlightEnabled }):OnChanged(function(v) state.config.highlightEnabled = v SaveConfig() end)
---   Tabs.ESP:AddButton({ Title = "Reset ESP Config", Description = "Reset to defaults", Callback = function() ResetConfig() end })
---   Tabs.ESP:AddButton({ Title = "Save Config", Description = "Save current config", Callback = function() SaveConfig() end })
---   Tabs.ESP:AddButton({ Title = "Load Config", Description = "Load saved config", Callback = function() LoadConfig() enableESP(state.config.enabled) end })
-
--- Load saved config then start with current value
-LoadConfig()
--- (example) If you want ESP enabled by default from saved config:
-if state.config.enabled then
-    enableESP(true)
+function ESP_API.SetColor(c)
+    state.config.espColor = c
 end
 
--- Provide API for external scripts to control quickly:
-return {
-    Enable = enableESP,
-    CreateForPlayer = createESPForPlayer,
-    RemoveForPlayer = removeESPForPlayer,
-    SaveConfig = SaveConfig,
-    LoadConfig = LoadConfig,
-    ResetConfig = ResetConfig,
-    GetConfig = function() return deepCopy(state.config) end,
-}
+function ESP_API.SetShowName(v) state.config.showName = v end
+function ESP_API.SetShowHealth(v) state.config.showHealth = v end
+function ESP_API.SetShowDistance(v) state.config.showDistance = v end
+function ESP_API.SetUpdateRate(v) state.config.updateRate = math.clamp(v, 1, 60) end
+function ESP_API.SetMaxDistance(v) state.config.maxDistance = math.max(20, v) end
+function ESP_API.SetLabelScale(v) state.config.labelScale = math.clamp(v, 0.5, 3) end
+function ESP_API.SetAlwaysOnTop(v) state.config.alwaysOnTop = v end
+function ESP_API.SetHighlightEnabled(v) state.config.highlightEnabled = v end
+function ESP_API.SetHighlightFillTrans(v) state.config.highlightFillTransparency = math.clamp(v, 0, 1) end
+function ESP_API.SetHighlightOutlineTrans(v) state.config.highlightOutlineTransparency = math.clamp(v, 0, 1) end
+function ESP_API.ResetConfig()
+    state.config = {
+        enabled = false,
+        updateRate = 10,
+        maxDistance = 250,
+        maxVisibleCount = 60,
+        showName = true,
+        showHealth = true,
+        showDistance = true,
+        espColor = Color3.fromRGB(255, 50, 50),
+        labelScale = 1,
+        alwaysOnTop = false,
+        smartHideCenter = true,
+        centerHideRadius = 0.12,
+        raycastOcclusion = false,
+        raycastInterval = 0.6,
+        highlightEnabled = false,
+        highlightFillTransparency = 0.6,
+        highlightOutlineTransparency = 0.6,
+        teamCheck = true,
+        ignoreLocalPlayer = true,
+    }
+end
 
+-- expose API object for UI code below
+_G.ATG_ESP_API = ESP_API
+
+-- Example: UI hookup (ปรับให้เข้ากับ API Tabs.* ที่ให้มา)
+-- สมมติมี Tabs.ESP อยู่แล้ว
+if Tabs and Tabs.ESP then
+    local espToggle = Tabs.ESP:AddToggle("ESPToggle", { Title = "ESP", Default = state.config.enabled })
+    espToggle:OnChanged(function(v) ESP_API.ToggleEnabled(v) end)
+
+    local color = Tabs.ESP:AddColorpicker("ESPColor", { Title = "ESP Color", Default = state.config.espColor })
+    color:OnChanged(function(c) ESP_API.SetColor(c) end)
+
+    Tabs.ESP:AddToggle("ESP_Name", { Title = "Show Name", Default = state.config.showName }):OnChanged(function(v) ESP_API.SetShowName(v) end)
+    Tabs.ESP:AddToggle("ESP_Health", { Title = "Show Health", Default = state.config.showHealth }):OnChanged(function(v) ESP_API.SetShowHealth(v) end)
+    Tabs.ESP:AddToggle("ESP_Distance", { Title = "Show Distance", Default = state.config.showDistance }):OnChanged(function(v) ESP_API.SetShowDistance(v) end)
+
+    Tabs.ESP:AddToggle("ESP_Highlight", { Title = "Highlight", Default = state.config.highlightEnabled }):OnChanged(function(v) ESP_API.SetHighlightEnabled(v) end)
+    Tabs.ESP:AddSlider("ESP_HighlightFill", { Title = "Highlight Fill Transparency", Default = state.config.highlightFillTransparency, Min = 0, Max = 1, Rounding = 0.01 }):OnChanged(function(v) ESP_API.SetHighlightFillTrans(v) end)
+    Tabs.ESP:AddSlider("ESP_HighlightOutline", { Title = "Highlight Outline Transparency", Default = state.config.highlightOutlineTransparency, Min = 0, Max = 1, Rounding = 0.01 }):OnChanged(function(v) ESP_API.SetHighlightOutlineTrans(v) end)
+
+    Tabs.ESP:AddSlider("ESP_Rate", { Title = "Update Rate (per sec)", Default = state.config.updateRate, Min = 1, Max = 60, Rounding = 1 }):OnChanged(function(v) ESP_API.SetUpdateRate(v) end)
+    Tabs.ESP:AddSlider("ESP_MaxDist", { Title = "Max Distance", Default = state.config.maxDistance, Min = 50, Max = 1000, Rounding = 1 }):OnChanged(function(v) ESP_API.SetMaxDistance(v) end)
+    Tabs.ESP:AddSlider("ESP_LabelScale", { Title = "Label Scale", Default = state.config.labelScale, Min = 0.5, Max = 3, Rounding = 0.1 }):OnChanged(function(v) ESP_API.SetLabelScale(v) end)
+    Tabs.ESP:AddToggle("ESP_AlwaysOnTop", { Title = "AlwaysOnTop", Default = state.config.alwaysOnTop }):OnChanged(function(v) ESP_API.SetAlwaysOnTop(v) end)
+
+    Tabs.ESP:AddButton({
+        Title = "Reset ESP Config",
+        Description = "Reset to sane defaults",
+        Callback = function()
+            ESP_API.ResetConfig()
+            -- อัพเดต UI values (ถ้า API library มี method SetValue ให้เรียก; ตัวอย่างไม่รู้ API ชื่อเฉพาะ)
+            -- ถ้าไม่มีให้แอยด์ผู้ใช้รีสตาร์ท UI หรือเราจะเก็บค่าเริ่มต้นไว้แยก
+            print("ESP config reset. Reopen UI to sync values.")
+        end
+    })
+end
+
+-- end of script
