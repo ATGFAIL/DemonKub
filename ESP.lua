@@ -1,50 +1,41 @@
--- ATG ESP (optimized)
--- หลักการสำคัญ:
--- 1) ใช้ centralized update loop (Heartbeat) ที่ throttle ด้วย updateInterval (ไม่สร้าง RenderStepped per-player)
--- 2) Culling: ระยะ, อยู่ในหน้าจอ, (optionally) raycast สำหรับ visibility แบบ throttled
--- 3) Object pooling สำหรับ BillboardGui และ Highlight เพื่อลดการสร้าง/ทำลายบ่อย ๆ
--- 4) เก็บ state/config ที่ UI สามารถแก้ได้ และมี Reset/Presets
--- 5) เช็ค cleanup เมื่อ PlayerLeft หรือ Unload
-
+-- ATG ESP (optimized) — patched version (UI sync + Reset fixes)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 -- state + config (เก็บค่า default ที่เหมาะสม)
-local state = state or {} -- บันทึกข้ามสคริปต์ถ้ามี
-state.espTable = state.espTable or {} -- map userId -> info
+local state = state or {}
+state.espTable = state.espTable or {}
 state.pools = state.pools or {billboards = {}, highlights = {}}
 state.config = state.config or {
     enabled = false,
-    updateRate = 10,             -- updates per second (10 => 0.1s interval)
-    maxDistance = 250,           -- เมตร ในเกม units
-    maxVisibleCount = 60,        -- limit จำนวน ESP แสดงพร้อมกัน (ป้องกัน overload)
+    updateRate = 10,
+    maxDistance = 250,
+    maxVisibleCount = 60,
     showName = true,
     showHealth = true,
     showDistance = true,
     espColor = Color3.fromRGB(255, 50, 50),
-    labelScale = 1,              -- scale ของข้อความ (TextScaled true จะอิงขนาด parent)
-    alwaysOnTop = false,         -- BillboardGui.AlwaysOnTop (ถ้า true จะไม่ถูกบัง)
-    smartHideCenter = true,      -- ซ่อน label ถ้ามันบังหน้าจอกลาง (ปรับได้)
-    centerHideRadius = 0.12,     -- % screen radius จาก center ที่จะซ่อน (0.12 => 12%)
-    raycastOcclusion = false,    -- ถ้าต้องการเพิ่ม check line-of-sight (ถ้าเปิดจะทำงานแบบ throttled)
-    raycastInterval = 0.6,       -- วินาทีต่อการ raycast ต่อตัว (ถ้าเปิด)
+    labelScale = 1,
+    alwaysOnTop = false,
+    smartHideCenter = true,
+    centerHideRadius = 0.12,
+    raycastOcclusion = false,
+    raycastInterval = 0.6,
     highlightEnabled = false,
     highlightFillTransparency = 0.6,
     highlightOutlineTransparency = 0.6,
-    teamCheck = true,            -- ไม่แสดง ESP ของเพื่อนร่วมทีม (ถ้าเกมมีทีม)
-    ignoreLocalPlayer = true,    -- ไม่แสดงตัวเอง
+    teamCheck = true,
+    ignoreLocalPlayer = true,
 }
 
--- pooling helpers
+-- Helpers: pooling...
 local function borrowBillboard()
     local pool = state.pools.billboards
     if #pool > 0 then
         return table.remove(pool)
     else
-        -- สร้างใหม่
         local billboard = Instance.new("BillboardGui")
         billboard.Name = "ATG_ESP"
         billboard.Size = UDim2.new(0, 150, 0, 30)
@@ -102,7 +93,7 @@ local function returnHighlight(hl)
     table.insert(state.pools.highlights, hl)
 end
 
--- helper utilities
+-- util
 local function getHRP(player)
     if not player or not player.Character then return nil end
     return player.Character:FindFirstChild("HumanoidRootPart")
@@ -111,17 +102,13 @@ local function getHumanoid(char)
     if not char then return nil end
     return char:FindFirstChildOfClass("Humanoid")
 end
-
 local function isSameTeam(a,b)
-    -- best-effort: ถ้าตัวเกมมี Team, compare Team property
     if not a or not b then return false end
-    if a.Team and b.Team and a.Team == b.Team then
-        return true
-    end
+    if a.Team and b.Team and a.Team == b.Team then return true end
     return false
 end
 
--- create / remove logic (doesn't connect RenderStepped per-player)
+-- entries
 local function ensureEntryForPlayer(p)
     if not p then return end
     local uid = p.UserId
@@ -129,29 +116,23 @@ local function ensureEntryForPlayer(p)
 
     local info = {
         player = p,
-        billboardObj = nil, -- {billboard,label}
-        highlightObj = nil, -- Highlight instance
+        billboardObj = nil,
+        highlightObj = nil,
         lastVisible = false,
         lastScreenPos = Vector2.new(0,0),
         lastDistance = math.huge,
         lastRaycast = -999,
-        connected = true, -- if we have CharacterAdded connection
+        connected = true,
         charConn = nil
     }
 
-    -- connect character added to reattach Adornee when respawn
     info.charConn = p.CharacterAdded:Connect(function(char)
-        -- small delay ให้เวลา Head สร้าง
         task.wait(0.05)
         if info.billboardObj and info.billboardObj.billboard then
             local head = char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
-            if head then
-                info.billboardObj.billboard.Adornee = head
-            end
+            if head then info.billboardObj.billboard.Adornee = head end
         end
-        if info.highlightObj then
-            info.highlightObj.Adornee = char
-        end
+        if info.highlightObj then info.highlightObj.Adornee = char end
     end)
 
     state.espTable[uid] = info
@@ -163,19 +144,13 @@ local function cleanupEntry(uid)
     if not info then return end
     pcall(function()
         if info.charConn then info.charConn:Disconnect() info.charConn = nil end
-        if info.billboardObj then
-            returnBillboard(info.billboardObj)
-            info.billboardObj = nil
-        end
-        if info.highlightObj then
-            returnHighlight(info.highlightObj)
-            info.highlightObj = nil
-        end
+        if info.billboardObj then returnBillboard(info.billboardObj) info.billboardObj = nil end
+        if info.highlightObj then returnHighlight(info.highlightObj) info.highlightObj = nil end
     end)
     state.espTable[uid] = nil
 end
 
--- visibility check (distance + on-screen + optional raycast)
+-- visibility
 local function shouldShowFor(info)
     if not info or not info.player then return false end
     local p = info.player
@@ -188,31 +163,22 @@ local function shouldShowFor(info)
     if not myHRP or not theirHRP then return false end
 
     local dist = (myHRP.Position - theirHRP.Position).Magnitude
-    if dist > state.config.maxDistance then
-        return false
-    end
+    if dist > state.config.maxDistance then return false end
 
-    -- screen check
     local head = p.Character:FindFirstChild("Head") or p.Character:FindFirstChild("UpperTorso") or theirHRP
     if not head then return false end
     local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
     if not onScreen then return false end
 
-    -- smartCenter hide: ถ้า label อยู่ใกล้หน้าจอกลางมากเกินไป
     if state.config.smartHideCenter then
         local sx = screenPos.X / Camera.ViewportSize.X
         local sy = screenPos.Y / Camera.ViewportSize.Y
-        local cx = 0.5
-        local cy = 0.5
-        local dx = sx - cx
-        local dy = sy - cy
+        local dx = sx - 0.5
+        local dy = sy - 0.5
         local d = math.sqrt(dx*dx + dy*dy)
-        if d < state.config.centerHideRadius then
-            return false
-        end
+        if d < state.config.centerHideRadius then return false end
     end
 
-    -- optional throttled raycast occlusion (ถ้าเปิด)
     if state.config.raycastOcclusion then
         local now = tick()
         if now - info.lastRaycast >= state.config.raycastInterval then
@@ -223,27 +189,19 @@ local function shouldShowFor(info)
             rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
             rayParams.FilterType = Enum.RaycastFilterType.Blacklist
             local r = workspace:Raycast(origin, direction, rayParams)
-            -- ถ้าวัตถุติดกันและไม่ใช่ตัวเป้าหมาย แปลว่าไม่ visible
-            if r and r.Instance and not r.Instance:IsDescendantOf(p.Character) then
-                return false
-            end
-        else
-            -- ใช้ last known result (ไม่ทำ raycast ทุก frame)
-            -- ถ้าไม่มี last result ให้อนุรักษ์ default true
+            if r and r.Instance and not r.Instance:IsDescendantOf(p.Character) then return false end
         end
     end
 
     return true
 end
 
--- update label content (only when changed)
+-- label text
 local function buildLabelText(p)
     local parts = {}
     if state.config.showName then table.insert(parts, p.DisplayName or p.Name) end
     local hum = getHumanoid(p.Character)
-    if state.config.showHealth and hum then
-        table.insert(parts, "HP:" .. math.floor(hum.Health))
-    end
+    if state.config.showHealth and hum then table.insert(parts, "HP:" .. math.floor(hum.Health)) end
     if state.config.showDistance then
         local myHRP = getHRP(LocalPlayer)
         local theirHRP = getHRP(p)
@@ -255,9 +213,9 @@ local function buildLabelText(p)
     return table.concat(parts, " | ")
 end
 
--- main centralized updater (throttled)
+-- centralized updater
 local accumulator = 0
-local updateInterval = 1 / math.max(1, state.config.updateRate) -- secs
+local updateInterval = 1 / math.max(1, state.config.updateRate)
 local lastVisibleCount = 0
 
 local function performUpdate(dt)
@@ -266,30 +224,22 @@ local function performUpdate(dt)
     if accumulator < updateInterval then return end
     accumulator = accumulator - updateInterval
 
-    -- gather players (and ensure entries exist)
     local visibleCount = 0
     local players = Players:GetPlayers()
     for _, p in ipairs(players) do
-        if p ~= LocalPlayer or not state.config.ignoreLocalPlayer then
-            ensureEntryForPlayer(p)
-        end
+        if p ~= LocalPlayer or not state.config.ignoreLocalPlayer then ensureEntryForPlayer(p) end
     end
 
-    -- iterate entries and decide show/hide
     for uid, info in pairs(state.espTable) do
         local p = info.player
         if not p or not p.Parent then
             cleanupEntry(uid)
         else
             local canShow = state.config.enabled and shouldShowFor(info)
-            if canShow and visibleCount >= state.config.maxVisibleCount then
-                -- เกิน limit: ซ่อนเพื่อความเสถียร
-                canShow = false
-            end
+            if canShow and visibleCount >= state.config.maxVisibleCount then canShow = false end
 
             if canShow then
                 visibleCount = visibleCount + 1
-                -- ensure billboard exists
                 if not info.billboardObj then
                     local obj = borrowBillboard()
                     local head = p.Character and (p.Character:FindFirstChild("Head") or p.Character:FindFirstChild("UpperTorso") or getHRP(p))
@@ -304,7 +254,6 @@ local function performUpdate(dt)
                     end
                 end
 
-                -- ensure highlight if enabled
                 if state.config.highlightEnabled and not info.highlightObj then
                     local hl = borrowHighlight()
                     hl.Adornee = p.Character
@@ -320,30 +269,16 @@ local function performUpdate(dt)
                     info.highlightObj = nil
                 end
 
-                -- update label text & color only when changed
                 if info.billboardObj and info.billboardObj.label then
                     local txt = buildLabelText(p)
-                    if info.billboardObj.label.Text ~= txt then
-                        info.billboardObj.label.Text = txt
-                    end
-                    -- color
-                    if info.billboardObj.label.TextColor3 ~= state.config.espColor then
-                        info.billboardObj.label.TextColor3 = state.config.espColor
-                    end
-                    -- scale / Size adjustments
+                    if info.billboardObj.label.Text ~= txt then info.billboardObj.label.Text = txt end
+                    if info.billboardObj.label.TextColor3 ~= state.config.espColor then info.billboardObj.label.TextColor3 = state.config.espColor end
                     info.billboardObj.billboard.Size = UDim2.new(0, math.clamp(120 + (#txt * 4), 100, 280), 0, math.clamp(16 * state.config.labelScale, 12, 48))
+                    info.billboardObj.billboard.AlwaysOnTop = state.config.alwaysOnTop
                 end
-
             else
-                -- hide (recycle billboard/highlight)
-                if info.billboardObj then
-                    returnBillboard(info.billboardObj)
-                    info.billboardObj = nil
-                end
-                if info.highlightObj then
-                    returnHighlight(info.highlightObj)
-                    info.highlightObj = nil
-                end
+                if info.billboardObj then returnBillboard(info.billboardObj) info.billboardObj = nil end
+                if info.highlightObj then returnHighlight(info.highlightObj) info.highlightObj = nil end
             end
         end
     end
@@ -351,64 +286,135 @@ local function performUpdate(dt)
     lastVisibleCount = visibleCount
 end
 
--- main connection (unbind old if exists)
-if state._espHeartbeatConn then
-    pcall(function() state._espHeartbeatConn:Disconnect() end)
-    state._espHeartbeatConn = nil
-end
-
+-- connect heartbeat
+if state._espHeartbeatConn then pcall(function() state._espHeartbeatConn:Disconnect() end) state._espHeartbeatConn = nil end
 state._espHeartbeatConn = RunService.Heartbeat:Connect(performUpdate)
 
--- Player join/leave cleanup
-Players.PlayerRemoving:Connect(function(p)
-    if not p then return end
-    cleanupEntry(p.UserId)
-end)
+-- cleanup on leave
+Players.PlayerRemoving:Connect(function(p) if not p then return end cleanupEntry(p.UserId) end)
 
--- UI integration: (ใช้ API ที่ให้มาในตัวอย่าง Tabs.*)
--- ฟังก์ชัน applyConfig เพื่อ sync ค่าจาก UI ไป state.config
-local function applyConfigFromUI(uiConfig)
-    for k,v in pairs(uiConfig) do
-        state.config[k] = v
-    end
+-- UI sync helpers (รองรับหลายไลบรารี)
+local uiRefs = {} -- store widgets by key
+
+local function trySetWidgetValue(widget, val)
+    if not widget then return end
+    pcall(function()
+        -- common APIs across various UI libs
+        if widget.SetValue then widget:SetValue(val) end
+        if widget.Set then widget:Set(val) end
+        if widget.SetState then widget:SetState(val) end
+        if widget.SetValueNoCallback then widget:SetValueNoCallback(val) end
+        -- some libs store .Value property
+        if widget.Value ~= nil then widget.Value = val end
+    end)
 end
 
--- Exposed functions for the UI to hook into:
-local ESP_API = {}
+-- function to apply config to runtime (and update visuals immediately)
+local function applyConfigToState(cfg)
+    -- shallow copy allowed (cfg is a table)
+    for k, v in pairs(cfg) do state.config[k] = v end
 
-function ESP_API.ToggleEnabled(v)
-    state.config.enabled = v
-    if not v then
-        -- immediate cleanup of visuals but keep entries
-        for uid,info in pairs(state.espTable) do
-            if info.billboardObj then
-                returnBillboard(info.billboardObj)
-                info.billboardObj = nil
-            end
-            if info.highlightObj then
-                returnHighlight(info.highlightObj)
+    -- immediate side-effects
+    updateInterval = 1 / math.max(1, state.config.updateRate)
+
+    -- update existing billboards / highlights
+    for uid, info in pairs(state.espTable) do
+        if info.billboardObj and info.billboardObj.billboard then
+            local bb = info.billboardObj.billboard
+            local label = info.billboardObj.label
+            label.TextColor3 = state.config.espColor
+            bb.AlwaysOnTop = state.config.alwaysOnTop
+            bb.Size = UDim2.new(0, math.clamp(120 + (#label.Text * 4), 100, 280), 0, math.clamp(16 * state.config.labelScale, 12, 48))
+        end
+        if info.highlightObj then
+            local hl = info.highlightObj
+            hl.FillColor = state.config.espColor
+            hl.FillTransparency = state.config.highlightFillTransparency
+            hl.OutlineColor = state.config.espColor
+            hl.OutlineTransparency = state.config.highlightOutlineTransparency
+            hl.Enabled = state.config.highlightEnabled
+            if not state.config.highlightEnabled then
+                returnHighlight(hl)
                 info.highlightObj = nil
             end
         end
     end
 end
 
+-- Exposed API
+local ESP_API = {}
+
+function ESP_API.ToggleEnabled(v)
+    state.config.enabled = v
+    if not v then
+        for uid,info in pairs(state.espTable) do
+            if info.billboardObj then returnBillboard(info.billboardObj) info.billboardObj = nil end
+            if info.highlightObj then returnHighlight(info.highlightObj) info.highlightObj = nil end
+        end
+    end
+end
+
 function ESP_API.SetColor(c)
     state.config.espColor = c
+    -- live update
+    for _,info in pairs(state.espTable) do
+        if info.billboardObj and info.billboardObj.label then info.billboardObj.label.TextColor3 = c end
+        if info.highlightObj then
+            info.highlightObj.FillColor = c
+            info.highlightObj.OutlineColor = c
+        end
+    end
 end
 
 function ESP_API.SetShowName(v) state.config.showName = v end
 function ESP_API.SetShowHealth(v) state.config.showHealth = v end
 function ESP_API.SetShowDistance(v) state.config.showDistance = v end
-function ESP_API.SetUpdateRate(v) state.config.updateRate = math.clamp(v, 1, 60) end
+function ESP_API.SetUpdateRate(v)
+    state.config.updateRate = math.clamp(math.floor(v), 1, 60)
+    updateInterval = 1 / state.config.updateRate
+end
 function ESP_API.SetMaxDistance(v) state.config.maxDistance = math.max(20, v) end
-function ESP_API.SetLabelScale(v) state.config.labelScale = math.clamp(v, 0.5, 3) end
-function ESP_API.SetAlwaysOnTop(v) state.config.alwaysOnTop = v end
-function ESP_API.SetHighlightEnabled(v) state.config.highlightEnabled = v end
+function ESP_API.SetLabelScale(v)
+    state.config.labelScale = math.clamp(v, 0.5, 3)
+    -- apply to existing labels
+    for _,info in pairs(state.espTable) do
+        if info.billboardObj and info.billboardObj.label and info.billboardObj.billboard then
+            local label = info.billboardObj.label
+            info.billboardObj.billboard.Size = UDim2.new(0, math.clamp(120 + (#label.Text * 4), 100, 280), 0, math.clamp(16 * state.config.labelScale, 12, 48))
+        end
+    end
+end
+function ESP_API.SetAlwaysOnTop(v)
+    state.config.alwaysOnTop = v
+    for _,info in pairs(state.espTable) do
+        if info.billboardObj and info.billboardObj.billboard then info.billboardObj.billboard.AlwaysOnTop = v end
+    end
+end
+function ESP_API.SetHighlightEnabled(v)
+    state.config.highlightEnabled = v
+    -- toggle highlights on existing entries
+    for _,info in pairs(state.espTable) do
+        if v and not info.highlightObj and info.player and info.player.Character then
+            local hl = borrowHighlight()
+            hl.Adornee = info.player.Character
+            hl.Parent = info.player.Character
+            hl.Enabled = true
+            hl.FillColor = state.config.espColor
+            hl.FillTransparency = state.config.highlightFillTransparency
+            hl.OutlineColor = state.config.espColor
+            hl.OutlineTransparency = state.config.highlightOutlineTransparency
+            info.highlightObj = hl
+        elseif (not v) and info.highlightObj then
+            returnHighlight(info.highlightObj)
+            info.highlightObj = nil
+        end
+    end
+end
 function ESP_API.SetHighlightFillTrans(v) state.config.highlightFillTransparency = math.clamp(v, 0, 1) end
 function ESP_API.SetHighlightOutlineTrans(v) state.config.highlightOutlineTransparency = math.clamp(v, 0, 1) end
+
 function ESP_API.ResetConfig()
-    state.config = {
+    local defaults = {
         enabled = false,
         updateRate = 10,
         maxDistance = 250,
@@ -429,43 +435,78 @@ function ESP_API.ResetConfig()
         teamCheck = true,
         ignoreLocalPlayer = true,
     }
+    -- replace state.config
+    state.config = defaults
+    -- apply runtime changes
+    applyConfigToState(state.config)
+    -- update UI elements if present
+    -- try to update known widgets in uiRefs
+    pcall(function()
+        trySetWidgetValue(uiRefs.ESPToggle, state.config.enabled)
+        trySetWidgetValue(uiRefs.ESPColor, state.config.espColor)
+        trySetWidgetValue(uiRefs.ESP_Name, state.config.showName)
+        trySetWidgetValue(uiRefs.ESP_Health, state.config.showHealth)
+        trySetWidgetValue(uiRefs.ESP_Distance, state.config.showDistance)
+        trySetWidgetValue(uiRefs.ESP_Highlight, state.config.highlightEnabled)
+        trySetWidgetValue(uiRefs.ESP_HighlightFill, state.config.highlightFillTransparency)
+        trySetWidgetValue(uiRefs.ESP_HighlightOutline, state.config.highlightOutlineTransparency)
+        trySetWidgetValue(uiRefs.ESP_Rate, state.config.updateRate)
+        trySetWidgetValue(uiRefs.ESP_MaxDist, state.config.maxDistance)
+        trySetWidgetValue(uiRefs.ESP_LabelScale, state.config.labelScale)
+        trySetWidgetValue(uiRefs.ESP_AlwaysOnTop, state.config.alwaysOnTop)
+    end)
 end
 
--- expose API object for UI code below
+-- expose API
 _G.ATG_ESP_API = ESP_API
 
--- Example: UI hookup (ปรับให้เข้ากับ API Tabs.* ที่ให้มา)
--- สมมติมี Tabs.ESP อยู่แล้ว
+-- UI hookup (store refs and ensure OnChanged hooks update state)
 if Tabs and Tabs.ESP then
-    local espToggle = Tabs.ESP:AddToggle("ESPToggle", { Title = "ESP", Default = state.config.enabled })
-    espToggle:OnChanged(function(v) ESP_API.ToggleEnabled(v) end)
+    -- store ref for safe-set on Reset
+    uiRefs.ESPToggle = Tabs.ESP:AddToggle("ESPToggle", { Title = "ESP", Default = state.config.enabled })
+    if uiRefs.ESPToggle then uiRefs.ESPToggle:OnChanged(function(v) ESP_API.ToggleEnabled(v) end) end
 
-    local color = Tabs.ESP:AddColorpicker("ESPColor", { Title = "ESP Color", Default = state.config.espColor })
-    color:OnChanged(function(c) ESP_API.SetColor(c) end)
+    uiRefs.ESPColor = Tabs.ESP:AddColorpicker("ESPColor", { Title = "ESP Color", Default = state.config.espColor })
+    if uiRefs.ESPColor then uiRefs.ESPColor:OnChanged(function(c) ESP_API.SetColor(c) end) end
 
-    Tabs.ESP:AddToggle("ESP_Name", { Title = "Show Name", Default = state.config.showName }):OnChanged(function(v) ESP_API.SetShowName(v) end)
-    Tabs.ESP:AddToggle("ESP_Health", { Title = "Show Health", Default = state.config.showHealth }):OnChanged(function(v) ESP_API.SetShowHealth(v) end)
-    Tabs.ESP:AddToggle("ESP_Distance", { Title = "Show Distance", Default = state.config.showDistance }):OnChanged(function(v) ESP_API.SetShowDistance(v) end)
+    uiRefs.ESP_Name = Tabs.ESP:AddToggle("ESP_Name", { Title = "Show Name", Default = state.config.showName })
+    if uiRefs.ESP_Name then uiRefs.ESP_Name:OnChanged(function(v) ESP_API.SetShowName(v) end) end
 
-    Tabs.ESP:AddToggle("ESP_Highlight", { Title = "Highlight", Default = state.config.highlightEnabled }):OnChanged(function(v) ESP_API.SetHighlightEnabled(v) end)
-    Tabs.ESP:AddSlider("ESP_HighlightFill", { Title = "Highlight Fill Transparency", Default = state.config.highlightFillTransparency, Min = 0, Max = 1, Rounding = 0.01 }):OnChanged(function(v) ESP_API.SetHighlightFillTrans(v) end)
-    Tabs.ESP:AddSlider("ESP_HighlightOutline", { Title = "Highlight Outline Transparency", Default = state.config.highlightOutlineTransparency, Min = 0, Max = 1, Rounding = 0.01 }):OnChanged(function(v) ESP_API.SetHighlightOutlineTrans(v) end)
+    uiRefs.ESP_Health = Tabs.ESP:AddToggle("ESP_Health", { Title = "Show Health", Default = state.config.showHealth })
+    if uiRefs.ESP_Health then uiRefs.ESP_Health:OnChanged(function(v) ESP_API.SetShowHealth(v) end) end
 
-    Tabs.ESP:AddSlider("ESP_Rate", { Title = "Update Rate (per sec)", Default = state.config.updateRate, Min = 1, Max = 60, Rounding = 1 }):OnChanged(function(v) ESP_API.SetUpdateRate(v) end)
-    Tabs.ESP:AddSlider("ESP_MaxDist", { Title = "Max Distance", Default = state.config.maxDistance, Min = 50, Max = 1000, Rounding = 1 }):OnChanged(function(v) ESP_API.SetMaxDistance(v) end)
-    Tabs.ESP:AddSlider("ESP_LabelScale", { Title = "Label Scale", Default = state.config.labelScale, Min = 0.5, Max = 3, Rounding = 0.1 }):OnChanged(function(v) ESP_API.SetLabelScale(v) end)
-    Tabs.ESP:AddToggle("ESP_AlwaysOnTop", { Title = "AlwaysOnTop", Default = state.config.alwaysOnTop }):OnChanged(function(v) ESP_API.SetAlwaysOnTop(v) end)
+    uiRefs.ESP_Distance = Tabs.ESP:AddToggle("ESP_Distance", { Title = "Show Distance", Default = state.config.showDistance })
+    if uiRefs.ESP_Distance then uiRefs.ESP_Distance:OnChanged(function(v) ESP_API.SetShowDistance(v) end) end
+
+    uiRefs.ESP_Highlight = Tabs.ESP:AddToggle("ESP_Highlight", { Title = "Highlight", Default = state.config.highlightEnabled })
+    if uiRefs.ESP_Highlight then uiRefs.ESP_Highlight:OnChanged(function(v) ESP_API.SetHighlightEnabled(v) end) end
+
+    uiRefs.ESP_HighlightFill = Tabs.ESP:AddSlider("ESP_HighlightFill", { Title = "Highlight Fill Transparency", Default = state.config.highlightFillTransparency, Min = 0, Max = 1, Rounding = 0.01 })
+    if uiRefs.ESP_HighlightFill then uiRefs.ESP_HighlightFill:OnChanged(function(v) ESP_API.SetHighlightFillTrans(v) end) end
+
+    uiRefs.ESP_HighlightOutline = Tabs.ESP:AddSlider("ESP_HighlightOutline", { Title = "Highlight Outline Transparency", Default = state.config.highlightOutlineTransparency, Min = 0, Max = 1, Rounding = 0.01 })
+    if uiRefs.ESP_HighlightOutline then uiRefs.ESP_HighlightOutline:OnChanged(function(v) ESP_API.SetHighlightOutlineTrans(v) end) end
+
+    uiRefs.ESP_Rate = Tabs.ESP:AddSlider("ESP_Rate", { Title = "Update Rate (per sec)", Default = state.config.updateRate, Min = 1, Max = 60, Rounding = 1 })
+    if uiRefs.ESP_Rate then uiRefs.ESP_Rate:OnChanged(function(v) ESP_API.SetUpdateRate(v) end) end
+
+    uiRefs.ESP_MaxDist = Tabs.ESP:AddSlider("ESP_MaxDist", { Title = "Max Distance", Default = state.config.maxDistance, Min = 50, Max = 1000, Rounding = 1 })
+    if uiRefs.ESP_MaxDist then uiRefs.ESP_MaxDist:OnChanged(function(v) ESP_API.SetMaxDistance(v) end) end
+
+    uiRefs.ESP_LabelScale = Tabs.ESP:AddSlider("ESP_LabelScale", { Title = "Label Scale", Default = state.config.labelScale, Min = 0.5, Max = 3, Rounding = 0.1 })
+    if uiRefs.ESP_LabelScale then uiRefs.ESP_LabelScale:OnChanged(function(v) ESP_API.SetLabelScale(v) end) end
+
+    uiRefs.ESP_AlwaysOnTop = Tabs.ESP:AddToggle("ESP_AlwaysOnTop", { Title = "AlwaysOnTop", Default = state.config.alwaysOnTop })
+    if uiRefs.ESP_AlwaysOnTop then uiRefs.ESP_AlwaysOnTop:OnChanged(function(v) ESP_API.SetAlwaysOnTop(v) end) end
 
     Tabs.ESP:AddButton({
         Title = "Reset ESP Config",
         Description = "Reset to sane defaults",
         Callback = function()
             ESP_API.ResetConfig()
-            -- อัพเดต UI values (ถ้า API library มี method SetValue ให้เรียก; ตัวอย่างไม่รู้ API ชื่อเฉพาะ)
-            -- ถ้าไม่มีให้แอยด์ผู้ใช้รีสตาร์ท UI หรือเราจะเก็บค่าเริ่มต้นไว้แยก
-            print("ESP config reset. Reopen UI to sync values.")
+            print("ESP config reset. UI should be synced.")
         end
     })
 end
 
--- end of script
+-- end
