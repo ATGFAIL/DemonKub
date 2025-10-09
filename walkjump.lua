@@ -1,3 +1,13 @@
+-- โหลด Fluent หรือ UI หลักก่อน (สมมติว่าทำไว้แล้ว)
+local Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/.../FluentLib.lua"))()
+local Window = Fluent:CreateWindow({ Title = "ATGHub" })
+local Tabs = {
+    Players = Window:AddTab({ Title = "Players" })
+}
+
+-- จากนั้นวางโค้ด Speed & Jump Controller ที่เฟลล์ส่งมาได้เลย
+
+
 local Section = Tabs.Players:AddSection("Speed & Jump")
 -- wait for LocalPlayer if not ready (safe in LocalScript)
 if not LocalPlayer or typeof(LocalPlayer) == "Instance" and LocalPlayer.ClassName == "" then
