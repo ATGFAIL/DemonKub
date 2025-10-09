@@ -246,8 +246,6 @@ local function main()
     print("[KeyClient] Access granted. Enjoy the game.")
 end
 
--- run
-main()
     -- ถ้าถึงตรงนี้แปลว่า key ถูกยืนยันและ hwid ตรง -> โหลดสคริปต์ของแมพ
     -- -----------------------
     -- Loader ส่วน allowedPlaces (เดิม)
