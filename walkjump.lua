@@ -1,5 +1,5 @@
 -- โหลด Fluent หรือ UI หลักก่อน (สมมติว่าทำไว้แล้ว)
-local Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/.../FluentLib.lua"))()
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 local Window = Fluent:CreateWindow({ Title = "ATGHub" })
 local Tabs = {
     Players = Window:AddTab({ Title = "Players" })
