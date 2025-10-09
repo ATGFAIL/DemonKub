@@ -1,3 +1,4 @@
+local Section = Tabs.Players:AddSection("Speed & Jump")
 -- wait for LocalPlayer if not ready (safe in LocalScript)
 if not LocalPlayer or typeof(LocalPlayer) == "Instance" and LocalPlayer.ClassName == "" then
     LocalPlayer = Players.LocalPlayer
