@@ -3,7 +3,7 @@ local Workspace = game:GetService("Workspace")
 
 local SaveManager = {} do
 	-- root folder (can be changed via SetFolder)
-	SaveManager.FolderRoot = "FluentSettings"
+	SaveManager.FolderRoot = "ATGSettings"
 	SaveManager.Ignore = {}
 	SaveManager.Options = {}
 	SaveManager.Parser = {
