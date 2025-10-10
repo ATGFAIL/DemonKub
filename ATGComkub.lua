@@ -1,33 +1,72 @@
--- ---------- Loader (allowedPlaces) ----------
+local HttpService = game:GetService("HttpService")
+local RunService  = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- -----------------------
+-- Allowed Place configuration
+-- -----------------------
+-- เพิ่มรายการได้ง่าย: ใส่ placeId => { name = "...", url = "https://.../file.lua" }
 local allowedPlaces = {
-    [8069117419]      = { name = "demon",               url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/demon.lua" },
-    [127742093697776] = { name = "Plants-Vs-Brainrots", url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Plants-Vs-Brainrots.lua" },
-    [96114180925459]  = { name = "Lasso-Animals",       url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Lasso-Animals.lua" },
-    [135880624242201] = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua" },
-    [142823291]       = { name = "Murder-Mystery-2",    url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua" },
+    [8069117419]          = { name = "demon",               url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/demon.lua" },
+    [127742093697776]     = { name = "Plants-Vs-Brainrots", url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Plants-Vs-Brainrots.lua" },
+    [96114180925459]      = { name = "Lasso-Animals",       url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Lasso-Animals.lua" },
+    [135880624242201]     = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua" },
+    [142823291]           = { name = "Murder-Mystery-2",     url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua" },
 }
 
-local function logInfo(...) print("🟩 [Loader]", ...) end
-local function logWarn(...) warn("🟨 [Loader]", ...) end
-local function logError(...) warn("🛑 [Loader]", ...) end
+-- -----------------------
+-- Helpers / Logger
+-- -----------------------
+local function logInfo(...)
+    print("🟩 [Loader]", ...)
+end
+
+local function logWarn(...)
+    warn("🟨 [Loader]", ...)
+end
+
+local function logError(...)
+    warn("🛑 [Loader]", ...)
+end
 
 local function isValidLuaUrl(url)
     if type(url) ~= "string" then return false end
+    -- basic checks: http/https and ends with .lua (case-insensitive)
     if not url:match("^https?://") then return false end
     if not url:lower():match("%.lua$") then return false end
     return true
 end
 
--- fetch script using our http_request (safer across exploits)
-local function fetchScriptViaRequest(url)
-    local res, err = http_request({ Url = url, Method = "GET" })
-    if not res then return false, tostring(err) end
-    if (res.StatusCode or res.status) >= 200 and (res.StatusCode or res.status) < 300 then
-        return true, res.Body or res.body or ""
-    end
-    return false, ("HTTP %s"):format(tostring(res.StatusCode or res.status))
+-- -----------------------
+-- Basic environment checks
+-- -----------------------
+local placeConfig = allowedPlaces[game.PlaceId]
+if not placeConfig then
+    logWarn("Script ไม่ทำงานในแมพนี้:", tostring(game.PlaceId))
+    return
 end
 
+logInfo(("Script loaded for PlaceId %s (%s)"):format(tostring(game.PlaceId), tostring(placeConfig.name)))
+
+-- Check HttpService availability early
+if not HttpService.HttpEnabled then
+    logError("HttpService.HttpEnabled = false. ไม่สามารถโหลดสคริปต์จาก URL ได้.")
+    -- ถ้าต้องการให้ทำงานต่อแม้ Http ปิด ให้ใส่ fallback (เช่น require ModuleScript) ด้านล่าง
+    -- return
+end
+
+-- -----------------------
+-- Script loader (with retries)
+-- -----------------------
+local function fetchScript(url)
+    local ok, result = pcall(function()
+        -- second arg true = skip cache; บาง executor อาจรองรับ
+        return game:HttpGet(url, true)
+    end)
+    return ok, result
+end
+
+-- options: retries (default 3), retryDelay (seconds)
 local function loadExtraScript(url, options)
     options = options or {}
     local retries = options.retries or 3
@@ -38,17 +77,22 @@ local function loadExtraScript(url, options)
     end
 
     for attempt = 1, retries do
-        local ok, res = fetchScriptViaRequest(url)
+        local ok, res = fetchScript(url)
         if ok and type(res) == "string" and #res > 0 then
+            -- attempt to execute safely
             local execOk, execRes = pcall(function()
+                -- loadstring may not exist in some environments; pcall + loadstring used here
                 local f, loadErr = loadstring(res)
-                if not f then error(("loadstring error: %s"):format(tostring(loadErr))) end
+                if not f then
+                    error(("loadstring error: %s"):format(tostring(loadErr)))
+                end
                 return f()
             end)
 
             if execOk then
                 return true, execRes
             else
+                -- execution failed
                 logWarn(("Attempt %d: failed to execute script from %s -> %s"):format(attempt, url, tostring(execRes)))
             end
         else
@@ -56,11 +100,32 @@ local function loadExtraScript(url, options)
         end
 
         if attempt < retries then
+            -- non-blocking small delay (coroutine.wrap allows the outer call to continue)
             wait(retryDelay)
         end
     end
 
     return false, ("All %d attempts failed for %s"):format(retries, url)
 end
--- run
-main()
+
+-- Run loader inside coroutine so main thread isn't blocked by network retries
+coroutine.wrap(function()
+    logInfo("เริ่มโหลดสคริปต์สำหรับแมพ:", placeConfig.name, placeConfig.url)
+    local ok, result = loadExtraScript(placeConfig.url, { retries = 3, retryDelay = 1 })
+
+    if ok then
+        logInfo("✅ Extra script loaded successfully for", placeConfig.name)
+    else
+        logError("❌ ไม่สามารถโหลดสคริปต์เพิ่มเติมได้:", result)
+        -- ตัวอย่าง fallback: ถ้ามี ModuleScript เก็บไว้ใน ReplicatedStorage ให้ require แทน
+        -- local mod = ReplicatedStorage:FindFirstChild("Fallback_" .. placeConfig.name)
+        -- if mod and mod:IsA("ModuleScript") then
+        --     local success, modRes = pcall(require, mod)
+        --     if success then
+        --         logInfo("✅ Loaded fallback ModuleScript for", placeConfig.name)
+        --     else
+        --         logError("Fallback ModuleScript error:", modRes)
+        --     end
+        -- end
+    end
+end)()
