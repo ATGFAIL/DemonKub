@@ -41,7 +41,7 @@ end
 -- -----------------------
 local placeConfig = allowedPlaces[game.PlaceId]
 if not placeConfig then
-    logWarn("Script ไม่ทำงานในแมพนี้:", tostring(game.PlaceId))
+    game.Players.LocalPlayer:Kick("[ ATG ] NOT SUPPORT")
     return
 end
 
