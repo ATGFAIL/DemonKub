@@ -1,15 +1,14 @@
 local HttpService = game:GetService("HttpService")
 local RunService  = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
 -- -----------------------
 -- Allowed Place configuration
 -- -----------------------
 -- เพิ่มรายการได้ง่าย: ใส่ placeId => { name = "...", url = "https://.../file.lua" }
 local allowedPlaces = {
-    [8069117419]          = { name = "demon",               url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/demon.lua" },
-    [127742093697776]     = { name = "Plants-Vs-Brainrots", url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Plants-Vs-Brainrots.lua" },
-    [96114180925459]      = { name = "Lasso-Animals",       url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Lasso-Animals.lua" },
+    [8069117419]          = { name = "demon",               url = "https://api.luarmor.net/files/v3/loaders/ac8370afd7ed657e592868fe5e6ff1cf.lua" },
+    [127742093697776]     = { name = "Plants-Vs-Brainrots", url = "https://api.luarmor.net/files/v3/loaders/059cb863ce855658c5a1b050dab6fbaf.lua" },
+    [96114180925459]      = { name = "Lasso-Animals",       url = "https://api.luarmor.net/files/v3/loaders/49ef22e94528a49b6f1f7b0de2a98367.lua" },
     [135880624242201]     = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua" },
     [142823291]           = { name = "Murder-Mystery-2",     url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua" },
 }
