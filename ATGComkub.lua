@@ -1,191 +1,163 @@
--- Loader ปรับปรุงโดย ATG-like suggestions
+-- Loader v2 — improved
 local HttpService = game:GetService("HttpService")
-local RunService  = game:GetService("RunService")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
--- -----------------------
--- Allowed Place configuration (ใส่ placeId => { name = "...", url = "https://.../file.lua", allowed_domains = {...} })
--- -----------------------
+-- config: ใส่ placeId => { name=..., url=..., integrity=nil (optional), retries=?, retryDelay=? }
 local allowedPlaces = {
-    [8069117419]      = { name = "demon",               url = "https://api.luarmor.net/files/v3/loaders/ac8370afd7ed657e592868fe5e6ff1cf.lua", allowed_domains = { "api.luarmor.net", "raw.githubusercontent.com" } },
-    [127742093697776] = { name = "Plants-Vs-Brainrots", url = "https://api.luarmor.net/files/v3/loaders/059cb863ce855658c5a1b050dab6fbaf.lua", allowed_domains = { "api.luarmor.net" } },
-    [96114180925459]  = { name = "Lasso-Animals",       url = "https://api.luarmor.net/files/v3/loaders/49ef22e94528a49b6f1f7b0de2a98367.lua", allowed_domains = { "api.luarmor.net" } },
-    [135880624242201] = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua", allowed_domains = { "raw.githubusercontent.com", "githubusercontent.com" } },
-    [142823291]       = { name = "Murder-Mystery-2",    url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua", allowed_domains = { "raw.githubusercontent.com" } },
+    [8069117419]          = { name = "demon",               url = "https://api.luarmor.net/files/v3/loaders/ac8370afd7ed657e592868fe5e6ff1cf.lua", retries=3, retryDelay=1 },
+    [127742093697776]     = { name = "Plants-Vs-Brainrots", url = "https://api.luarmor.net/files/v3/loaders/059cb863ce855658c5a1b050dab6fbaf.lua", retries=3, retryDelay=1 },
+    [96114180925459]      = { name = "Lasso-Animals",       url = "https://api.luarmor.net/files/v3/loaders/49ef22e94528a49b6f1f7b0de2a98367.lua", retries=3, retryDelay=1 },
+    [135880624242201]     = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua", retries=3, retryDelay=1 },
+    [142823291]           = { name = "Murder-Mystery-2",     url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua", retries=3, retryDelay=1 },
 }
 
--- -----------------------
--- Helpers / Logger (emoji เก๋ๆ)
--- -----------------------
-local function logInfo(...)
-    print("🟩 [Loader]", ...)
-end
-local function logWarn(...)
-    warn("🟨 [Loader]", ...)
-end
-local function logError(...)
-    warn("🛑 [Loader]", ...)
-end
+-- Simple logger w/ timestamp
+local function ts() return os.date("%Y-%m-%d %H:%M:%S") end
+local function logInfo(...) print(string.format("[%s] 🟩 [Loader]", ts()), ...) end
+local function logWarn(...) warn(string.format("[%s] 🟨 [Loader]", ts()), ...) end
+local function logError(...) warn(string.format("[%s] 🛑 [Loader]", ts()), ...) end
 
-local function safeLower(s)
-    return (type(s) == "string") and s:lower() or ""
-end
-
--- ตรวจสอบว่าเป็น URL .lua หรือ GitHub raw ที่น่าจะถูกต้อง
 local function isValidLuaUrl(url)
-    if type(url) ~= "string" then return false end
+    if type(url) ~= "string" or url == "" then return false end
     if not url:match("^https?://") then return false end
-    -- allow URLs that ends with .lua (case-insensitive) OR common raw github patterns
-    local lower = safeLower(url)
-    if lower:match("%.lua$") then return true end
-    if lower:match("raw%.githubusercontent%.com") or lower:match("githubusercontent%.com") then return true end
-    if lower:match("api%.luarmor%.net") then return true end
-    return false
+    -- allow query strings but require .lua somewhere near end
+    if not url:lower():match("%.lua($|%?)") then return false end
+    return true
 end
 
-local function getHostnameFromUrl(url)
-    local host = url:match("^https?://([^/]+)")
-    if host then
-        host = host:match("([^:]+)") -- strip :port if any
-    end
-    return host
-end
-
--- -----------------------
--- Basic environment checks
--- -----------------------
-local placeConfig = allowedPlaces[game.PlaceId]
-if not placeConfig then
-    -- Kick เฉพาะ client ที่เป็น LocalScript; ป้องกัน server script เรียก
-    if Players.LocalPlayer then
-        Players.LocalPlayer:Kick("[ ATG ] NOT SUPPORT")
-    else
-        logError("PlaceId not supported and no LocalPlayer found. Stopping loader.")
-    end
-    return
-end
-
-logInfo(("Script loaded for PlaceId %s (%s)"):format(tostring(game.PlaceId), tostring(placeConfig.name)))
-
--- Early HttpService check
-if not HttpService.HttpEnabled then
-    logError("HttpService.HttpEnabled = false. ไม่สามารถโหลดสคริปต์จาก URL ได้.")
-    -- fallback: ถ้ามี ModuleScript ใน ReplicatedStorage ให้ใช้ (ตัวอย่าง commented ไว้ด้านล่าง)
-    -- return
-end
-
--- -----------------------
--- Fetch helpers (with pcall, timeout-friendly)
--- -----------------------
-local function fetchScript(url)
-    if not HttpService.HttpEnabled then
-        return false, "HttpService disabled"
-    end
-
+-- prefer HttpService:GetAsync but allow game:HttpGet on some exploitors/stub envs
+local function httpGet(url)
     local ok, res = pcall(function()
-        -- prefer GetAsync as it's standard; but keep :HttpGet as fallback for some executors
-        -- note: some exploit runners override game:HttpGet; pcall to be safe
-        if HttpService.GetAsync then
+        if HttpService and HttpService.HttpEnabled then
+            -- GetAsync is the "official" method
             return HttpService:GetAsync(url, true)
-        else
+        elseif game.HttpGet then
             return game:HttpGet(url, true)
+        else
+            error("No HTTP method available.")
         end
     end)
-    if not ok then
-        return false, res
-    end
-    return true, res
+    return ok, res
 end
 
--- limit size (ป้องกันโหลดไฟล์ใหญ่เกินไป)
-local MAX_SCRIPT_BYTES = 200 * 1024 -- 200 KB
+-- safe load function: try loadstring -> load -> load_chunk fallback
+local function compileLua(code)
+    if type(code) ~= "string" then return false, "code is not string" end
+    local f, err = loadstring and loadstring(code) or load(code)
+    if not f then
+        return false, ("compile error: %s"):format(tostring(err))
+    end
+    -- protect execution in pcall
+    local ok, result = pcall(function() return f() end)
+    if ok then
+        return true, result
+    else
+        return false, ("runtime error: %s"):format(tostring(result))
+    end
+end
 
-local function loadExtraScript(url, options)
-    options = options or {}
-    local retries = options.retries or 3
-    local retryDelay = options.retryDelay or 1
-    local allowed_domains = placeConfig.allowed_domains or {}
+-- fetch with retries and exponential backoff
+local function fetchWithRetries(url, opts)
+    opts = opts or {}
+    local retries = opts.retries or 3
+    local retryDelay = opts.retryDelay or 1
+    local attempt = 0
 
     if not isValidLuaUrl(url) then
-        return false, "Invalid URL (must be https and .lua or approved raw host)"
+        return false, "Invalid URL: must be http(s) and end with .lua"
     end
 
-    local host = getHostnameFromUrl(url)
-    if #allowed_domains > 0 then
-        local okHost = false
-        for _, d in ipairs(allowed_domains) do
-            if safeLower(host):match(d) then
-                okHost = true
-                break
-            end
-        end
-        if not okHost then
-            return false, ("Host '%s' not allowed for this place"):format(tostring(host))
-        end
-    end
-
-    local loadFn = loadstring or load -- compatibility
-    for attempt = 1, retries do
-        local ok, res = fetchScript(url)
+    while attempt < retries do
+        attempt = attempt + 1
+        local ok, res = httpGet(url)
         if ok and type(res) == "string" and #res > 0 then
-            if #res > MAX_SCRIPT_BYTES then
-                logWarn(("Remote script too large (%d bytes)"):format(#res))
-                return false, "Remote script exceeds size limit"
-            end
-
-            -- try to load (safe pcall)
-            local execOk, execRes = pcall(function()
-                local f, loadErr = loadFn(res)
-                if not f then
-                    error(("load error: %s"):format(tostring(loadErr)))
-                end
-                -- run in protected environment: try to set an environment table if supported
-                -- Note: setfenv exists in Lua 5.1; Roblox may not allow environment modification.
-                -- We simply execute the chunk; user script is responsible for its own safety.
-                return f()
-            end)
-
-            if execOk then
-                return true, execRes
-            else
-                logWarn(("Attempt %d: failed to execute script from %s -> %s"):format(attempt, url, tostring(execRes)))
-            end
+            return true, res
         else
-            logWarn(("Attempt %d: failed to fetch %s -> %s"):format(attempt, url, tostring(res)))
-        end
-
-        if attempt < retries then
-            task.wait(retryDelay)
+            logWarn(("Attempt %d/%d failed to fetch %s -> %s"):format(attempt, retries, url, tostring(res)))
+            -- exponential backoff with jitter
+            if attempt < retries then
+                local waitTime = retryDelay * (2 ^ (attempt - 1))
+                -- small random jitter so parallel clients don't sync
+                waitTime = waitTime + math.random() * 0.3
+                task.wait(waitTime)
+            end
         end
     end
 
     return false, ("All %d attempts failed for %s"):format(retries, url)
 end
 
--- -----------------------
--- Runner (non-blocking)
--- -----------------------
-coroutine.wrap(function()
-    logInfo("เริ่มโหลดสคริปต์สำหรับแมพ:", placeConfig.name, placeConfig.url)
-    local ok, result = loadExtraScript(placeConfig.url, { retries = 3, retryDelay = 1 })
+-- Main loader (run in safe task)
+task.spawn(function()
+    -- ensure client context: LocalPlayer must exist
+    local player = Players.LocalPlayer
+    if not player then
+        logError("Script must run in a LocalScript (no LocalPlayer). Aborting.")
+        return
+    end
 
-    if ok then
-        logInfo("✅ Extra script loaded successfully for", placeConfig.name)
-    else
-        logError("❌ ไม่สามารถโหลดสคริปต์เพิ่มเติมได้:", result)
-        -- fallback example: require ModuleScript from ReplicatedStorage
+    local placeConfig = allowedPlaces[game.PlaceId]
+    if not placeConfig then
+        logError(("PlaceId %s not supported. Kicking user."):format(tostring(game.PlaceId)))
+        -- avoid abrupt kick during dev; only kick in live env
+        if not RunService:IsStudio() then
+            player:Kick("[ ATG ] NOT SUPPORT")
+        end
+        return
+    end
+
+    logInfo(("Loaded loader for PlaceId %s (%s)"):format(tostring(game.PlaceId), tostring(placeConfig.name)))
+
+    if not HttpService.HttpEnabled then
+        logError("HttpService.HttpEnabled = false. Cannot fetch external script.")
+        -- fallback: try local ModuleScript if exists
         local fallbackName = "Fallback_" .. tostring(placeConfig.name)
         local mod = ReplicatedStorage:FindFirstChild(fallbackName)
         if mod and mod:IsA("ModuleScript") then
-            local success, modRes = pcall(require, mod)
-            if success then
-                logInfo("✅ Loaded fallback ModuleScript for", placeConfig.name)
+            local ok, res = pcall(require, mod)
+            if ok then
+                logInfo("✅ Loaded fallback ModuleScript:", fallbackName)
+                return
             else
-                logError("Fallback ModuleScript error:", modRes)
+                logError("Fallback ModuleScript require failed:", res)
             end
-        else
-            logWarn("No fallback ModuleScript found:", fallbackName)
+        end
+        return
+    end
+
+    logInfo("เริ่มโหลดสคริปต์สำหรับแมพ:", placeConfig.name, placeConfig.url)
+    local okFetch, codeOrErr = fetchWithRetries(placeConfig.url, { retries = placeConfig.retries or 3, retryDelay = placeConfig.retryDelay or 1 })
+
+    if not okFetch then
+        logError("❌ ไม่สามารถดาวน์โหลดสคริปต์ได้:", codeOrErr)
+        return
+    end
+
+    -- optional: minimal integrity check (e.g., expected length or external signature)
+    if placeConfig.integrity then
+        -- NOTE: Roblox doesn't provide sha256 in standard lib; so this is a placeholder for external verification
+        -- If you want integrity, compute hash on server and pass via secure channel, or embed signed code
+        logInfo("Integrity field present but no verification implemented. Consider signed scripts.")
+    end
+
+    -- compile and run
+    local okRun, runRes = compileLua(codeOrErr)
+    if okRun then
+        logInfo("✅ Extra script executed successfully for", placeConfig.name)
+    else
+        logError("Execution failed:", runRes)
+        -- fallback attempt: find ModuleScript version
+        local fallbackName = "Fallback_" .. tostring(placeConfig.name)
+        local mod = ReplicatedStorage:FindFirstChild(fallbackName)
+        if mod and mod:IsA("ModuleScript") then
+            local succ, res = pcall(require, mod)
+            if succ then
+                logInfo("✅ Loaded fallback ModuleScript:", fallbackName)
+            else
+                logError("Fallback ModuleScript require failed:", res)
+            end
         end
     end
-end)()
+end)
