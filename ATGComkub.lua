@@ -12,6 +12,7 @@ local allowedPlaces = {
     [135880624242201]     = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua" },
     [142823291]           = { name = "Murder-Mystery-2",     url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua" },
     [126509999114328]     = { name = "99 Nights in the Forest", url = "https://api.luarmor.net/files/v3/loaders/3be199e8307561dc3cfb7855a31269dd.lua" },
+    [79546208627805]     = { name = "99 Nights in the Forest", url = "https://api.luarmor.net/files/v3/loaders/3be199e8307561dc3cfb7855a31269dd.lua" },
 }
 
 -- -----------------------
