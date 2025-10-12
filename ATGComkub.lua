@@ -10,10 +10,12 @@ local allowedPlaces = {
     [127742093697776]     = { name = "Plants-Vs-Brainrots", url = "https://api.luarmor.net/files/v3/loaders/059cb863ce855658c5a1b050dab6fbaf.lua" },
     [96114180925459]      = { name = "Lasso-Animals",       url = "https://api.luarmor.net/files/v3/loaders/49ef22e94528a49b6f1f7b0de2a98367.lua" },
     [135880624242201]     = { name = "Cut-Tree",            url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/cut-tree.lua" },
+    [142823291]           = { name = "Murder-Mystery-2",     url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Murder-Mystery-2.lua" },
     [126509999114328]     = { name = "99 Nights in the Forest", url = "https://api.luarmor.net/files/v3/loaders/3be199e8307561dc3cfb7855a31269dd.lua" },
     [102181577519757]     = { name = "DARK-DECEPTION-HUNTED", url = "https://api.luarmor.net/files/v3/loaders/4b264ea152dbb41b1916494d60607163.lua"},
     [136431686349723]     = { name = "DARK-DECEPTION-HUNTED", url = "https://api.luarmor.net/files/v3/loaders/4b264ea152dbb41b1916494d60607163.lua"},
     [142823291]           = { name = "Murder-Mystery-2",     url = "https://api.luarmor.net/files/v3/loaders/d48b61ec237a114790c3a9346aa4bedf.lua"},
+    [126884695634066]     = { name = "Grow-a-Garden",        url = "https://api.luarmor.net/files/v3/loaders/30c274d8989e8c01a8c8fa3511756d0b.lua"},
 }
 
 -- -----------------------
