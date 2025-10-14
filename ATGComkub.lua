@@ -16,6 +16,7 @@ local allowedPlaces = {
     [142823291]           = { name = "Murder-Mystery-2",     url = "https://api.luarmor.net/files/v3/loaders/d48b61ec237a114790c3a9346aa4bedf.lua"},
     [126884695634066]     = { name = "Grow-a-Garden",        url = "https://api.luarmor.net/files/v3/loaders/30c274d8989e8c01a8c8fa3511756d0b.lua"},
     [122826953758426]     = { name = "Raise-Animals",       url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Raise-Animals.lua"},
+    [115317601829407]     = { name = "Arise-Shadow-Hunt",    url = "https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/Arise-Shadow-Hunt.lua"}
 }
 
 -- -----------------------
