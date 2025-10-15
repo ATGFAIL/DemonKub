@@ -9,7 +9,7 @@ local coreGui = game:GetService("CoreGui")
 local Camera = workspace.CurrentCamera
 
 -- OPTION: ถ้าต้องการบังคับให้แสดงปุ่มแม้มีคีย์บอร์ด ให้ตั้งค่าเป็น true
-local FORCE_SHOW_IMG_BUTTON = false
+local FORCE_SHOW_IMG_BUTTON = true
 
 -- ตรวจว่าอุปกรณ์มีคีย์บอร์ดหรือไม่
 local hasKeyboard = UserInputService.KeyboardEnabled
