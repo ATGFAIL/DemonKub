@@ -135,5 +135,3 @@ coroutine.wrap(function()
         -- end
     end
 end)()
-
-loadstring(game:HttpGet("https://raw.githubusercontent.com/ATGFAIL/ATGHub/main/ButtonUI.lua"))()
