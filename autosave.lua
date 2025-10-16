@@ -383,107 +383,111 @@ local SaveManager = {} do
             end
         })
 
-        -- สมมติว่ามีฟังก์ชัน getConfigsFolder(self) และ SaveManager, self.Library, ฯลฯ ตามโค้ดคุณ
-local AutoToggle = section:AddToggle("SaveManager_AutoLoad", {
-    Title = "Autoload",
-    Description = "ตั้งค่าให้โหลดคอนฟิกนี้อัตโนมัติเมื่อเริ่มเกม",
-    Default = false
-})
+                -- Autoload toggle (replaces previous 'Set as autoload' button)
+        local AutoToggle = section:AddToggle("SaveManager_AutoLoad", { Title = "Autoload", Description = "ตั้งค่าให้โหลดคอนฟิกนี้อัตโนมัติเมื่อเริ่มเกม", Default = false })
 
--- guard flag เพื่อไม่ให้ OnChanged ทำงานขณะเรากำลังตั้งค่าเริ่มต้น
-local initializing = true
+        -- guard flag เพื่อไม่ให้ handler ทำงานขณะกำลัง init UI programmatically
+        local initializing_autoload = true
 
--- helper paths
-local autopath = getConfigsFolder(self) .. "/autoload.txt"
+        AutoToggle:OnChanged(function()
+            -- ถ้าเรากำลังตั้งค่าเริ่มต้น ให้ข้าม handler นี้
+            if initializing_autoload then return end
 
--- ฟังก์ชันช่วย: ตั้งคำอธิบายของ toggle แบบปลอดภัย (เช็คว่ามีเมธอด SetDesc หรือไม่)
-local function setToggleDesc(val)
-    if AutoToggle.SetDesc then
-        AutoToggle:SetDesc(val)
-    end
-end
+            local name = SaveManager.Options.SaveManager_ConfigList.Value
+            local autopath = getConfigsFolder(self) .. "/autoload.txt"
 
--- OnChanged callback (จะไม่ทำงานในช่วง initializing)
-AutoToggle:OnChanged(function()
-    if initializing then return end  -- ถ้าเรากำลังตั้งค่าเริ่มต้น ให้ข้าม
-    local name = SaveManager.Options.SaveManager_ConfigList.Value
+            if SaveManager.Options.SaveManager_AutoLoad.Value then
+                -- user เปิด toggle
+                if not name or name == "" then
+                    self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "โปรดเลือกคอนฟิกก่อนตั้งค่า Autoload",
+                        Duration = 7
+                    })
+                    -- revert toggle แต่ต้องทำแบบไม่ให้ trigger handler อีก => ใช้ flag
+                    initializing_autoload = true
+                    SaveManager.Options.SaveManager_AutoLoad:SetValue(false)
+                    initializing_autoload = false
+                    return
+                end
 
-    if SaveManager.Options.SaveManager_AutoLoad.Value then
-        -- ถ้าเปิด แต่ไม่มีคอนฟิกที่เลือก => แจ้งเตือนแล้ว revert
-        if not name or name == "" then
-            self.Library:Notify({
-                Title = "Interface",
-                Content = "Config loader",
-                SubContent = "โปรดเลือกคอนฟิกก่อนตั้งค่า Autoload",
-                Duration = 7
-            })
-            -- revert toggle (ใช้ SetValue เพื่อให้ UI อัปเดต)
-            SaveManager.Options.SaveManager_AutoLoad:SetValue(false)
-            return
-        end
+                -- เขียนไฟล์ autoload
+                pcall(writefile, autopath, name)
+                if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
+                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. name)
+                end
 
-        -- เขียนไฟล์อย่างปลอดภัย
-        pcall(function() writefile(autopath, name) end)
-        setToggleDesc("กำลังโหลดอัตโนมัติ: " .. name)
+                self.Library:Notify({
+                    Title = "Interface",
+                    Content = "Config loader",
+                    SubContent = string.format("Set %q to autoload", name),
+                    Duration = 7
+                })
+            else
+                -- user ปิด toggle -> ลบไฟล์ autoload
+                pcall(function() if isfile(autopath) then pcall(delfile, autopath) end end)
+                if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
+                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไม่มีการโหลดอัตโนมัติ")
+                end
 
-        self.Library:Notify({
-            Title = "Interface",
-            Content = "Config loader",
-            SubContent = string.format("Set %q to autoload", name),
-            Duration = 7
-        })
-    else
-        -- ปิด autoload -> ลบไฟล์ถ้ามี
-        pcall(function()
-            if isfile(autopath) then
-                pcall(delfile, autopath)
+                self.Library:Notify({
+                    Title = "Interface",
+                    Content = "Config loader",
+                    SubContent = "Autoload cleared",
+                    Duration = 7
+                })
             end
         end)
-        setToggleDesc("ไม่มีการโหลดอัตโนมัติ")
 
-        self.Library:Notify({
-            Title = "Interface",
-            Content = "Config loader",
-            SubContent = "Autoload cleared",
-            Duration = 7
-        })
-    end
-end)
+        -- populate current autoload desc & initial toggle state if exists
+        local autop = getConfigsFolder(self) .. "/autoload.txt"
+        if isfile(autop) then
+            local name = readfile(autop)
 
--- === ตอนเริ่มต้นของสคริปต์: อ่านไฟล์ก่อน แล้วตั้งค่า dropdown + toggle แบบเงียบ ๆ ===
-do
-    -- รีเฟรชรายการคอนฟิกก่อน เพื่อให้ dropdown มีค่า
-    if SaveManager.Options and SaveManager.Options.SaveManager_ConfigList and SaveManager.Options.SaveManager_ConfigList.SetValues then
-        SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
-    end
+            -- รีเฟรชรายการคอนฟิกก่อน
+            local values = self:RefreshConfigList()
+            SaveManager.Options.SaveManager_ConfigList:SetValues(values)
 
-    if isfile(autopath) then
-        local ok, name = pcall(readfile, autopath)
-        if ok and name and name ~= "" then
-            -- ตั้ง dropdown ให้เป็นคอนฟิกที่บันทึกไว้ (ถ้ามีใน list)
-            if SaveManager.Options.SaveManager_ConfigList.SetValue then
+            -- ตรวจว่าไฟล์ autoload อ้างถึงคอนฟิกที่มีจริงหรือไม่
+            local found = false
+            for _, v in ipairs(values) do
+                if v == name then
+                    found = true
+                    break
+                end
+            end
+
+            if found then
+                -- ตั้ง dropdown และ toggle โดยปิด handler ชั่วคราว
                 SaveManager.Options.SaveManager_ConfigList:SetValue(name)
-            end
-            -- ตั้ง toggle แต่ไม่ให้ callback ทำงานเพราะ initializing = true
-            if SaveManager.Options.SaveManager_AutoLoad.SetValue then
+                initializing_autoload = true
                 SaveManager.Options.SaveManager_AutoLoad:SetValue(true)
+                initializing_autoload = false
+
+                if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
+                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. name)
+                end
+            else
+                -- ถ้าไม่เจอคอนฟิก ให้แจ้งผู้ใช้แต่ **อย่า** ลบ autoload.txt โดยอัตโนมัติ
+                if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
+                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไฟล์ autoload ชี้ไปที่คอนฟิกที่ไม่มีอยู่: " .. name)
+                end
+                self.Library:Notify({
+                    Title = "Interface",
+                    Content = "Config loader",
+                    SubContent = "Autoload file references missing config: " .. tostring(name),
+                    Duration = 7
+                })
             end
-            setToggleDesc("กำลังโหลดอัตโนมัติ: " .. name)
         else
-            -- ถ้าอ่านไฟล์ไม่ได้ ให้ลบไฟล์ทิ้ง (optional)
-            pcall(delfile, autopath)
-            setToggleDesc("ไม่มีการโหลดอัตโนมัติ")
+            if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
+                SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไม่มีการโหลดอัตโนมัติ")
+            end
         end
-    else
-        setToggleDesc("ไม่มีการโหลดอัตโนมัติ")
+
+        SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "SaveManager_AutoLoad" })
     end
-
-    -- เสร็จขั้นตอน initialization -> ปลด guard เพื่อให้ callback ทำงานตามปกติ
-    initializing = false
-end
-
--- หากต้องการ อย่าลืมเพิ่ม index ให้ SaveManager ไม่เซฟ toggle เป็นส่วนหนึ่งของ config ปกติ
-SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "SaveManager_AutoLoad" })
 
     -- initial build
     SaveManager:BuildFolderTree()
