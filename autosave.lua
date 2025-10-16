@@ -175,14 +175,6 @@ local SaveManager = {} do
     function SaveManager:SetLibrary(library)
         self.Library = library
         self.Options = library.Options
-
-        -- Try to auto-load config for this map immediately when library is set.
-        -- This makes the autoload behavior persistent across sessions (if autoload.txt exists).
-        pcall(function()
-            -- LoadAutoloadConfig uses self.Library for notifications and self:Load to apply settings.
-            -- Wrapping in pcall prevents errors if UI options haven't been built yet.
-            self:LoadAutoloadConfig()
-        end)
     end
 
     function SaveManager:Save(name)
@@ -281,150 +273,136 @@ local SaveManager = {} do
     end
 
     function SaveManager:BuildConfigSection(tab)
-    assert(self.Library, "Must set SaveManager.Library")
+        assert(self.Library, "Must set SaveManager.Library")
 
-    local section = tab:AddSection("Configuration")
+        local section = tab:AddSection("Configuration")
 
-    -- helper for autoload toggle path
-    local function getAutoloadTogglePath(self)
-        return getConfigsFolder(self) .. "/autoload_toggle.txt"
-    end
+        -- Config name (Title in English, Description in Thai)
+        section:AddInput("SaveManager_ConfigName",    { Title = "Config name", Description = "ชื่อไฟล์สำหรับบันทึกค่าการตั้งค่า (ภาษาไทย)" })
 
-    local function writeAutoloadToggle(self, enabled)
-        local path = getAutoloadTogglePath(self)
-        pcall(function() writefile(path, enabled and "1" or "0") end)
-    end
+        -- Config list dropdown
+        section:AddDropdown("SaveManager_ConfigList", { Title = "Config list", Description = "รายการคอนฟิกที่มีอยู่ (เลือกเพื่อโหลด/แก้ไข)", Values = self:RefreshConfigList(), AllowNull = true })
 
-    local function readAutoloadToggle(self)
-        local path = getAutoloadTogglePath(self)
-        if isfile(path) then
-            local ok, data = pcall(readfile, path)
-            if ok and data then
-                return data:match("1") ~= nil
-            end
-        end
-        return false
-    end
+        -- Create config
+        section:AddButton({
+            Title = "Create config",
+            Description = "สร้างไฟล์คอนฟิกจากการตั้งค่าปัจจุบัน",
+            Callback = function()
+                local name = SaveManager.Options.SaveManager_ConfigName.Value
 
-    -- Config name (Title in English, Description in Thai)
-    section:AddInput("SaveManager_ConfigName",    { Title = "Config name", Description = "ชื่อไฟล์สำหรับบันทึกค่าการตั้งค่า (ภาษาไทย)" })
+                if name:gsub(" ", "") == "" then
+                    return self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "ชื่อคอนฟิกไม่ถูกต้อง (เว้นว่าง)",
+                        Duration = 7
+                    })
+                end
 
-    -- Config list dropdown
-    section:AddDropdown("SaveManager_ConfigList", { Title = "Config list", Description = "รายการคอนฟิกที่มีอยู่ (เลือกเพื่อโหลด/แก้ไข)", Values = self:RefreshConfigList(), AllowNull = true })
+                local success, err = self:Save(name)
+                if not success then
+                    return self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "การบันทึกคอนฟิกล้มเหลว: " .. err,
+                        Duration = 7
+                    })
+                end
 
-    -- Create config
-    section:AddButton({
-        Title = "Create config",
-        Description = "สร้างไฟล์คอนฟิกจากการตั้งค่าปัจจุบัน",
-        Callback = function()
-            local name = SaveManager.Options.SaveManager_ConfigName.Value
-
-            if name:gsub(" ", "") == "" then
-                return self.Library:Notify({
+                self.Library:Notify({
                     Title = "Interface",
                     Content = "Config loader",
-                    SubContent = "ชื่อคอนฟิกไม่ถูกต้อง (เว้นว่าง)",
+                    SubContent = string.format("Created config %q", name),
+                    Duration = 7
+                })
+
+                SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
+                SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
+            end
+        })
+
+        -- Load config
+        section:AddButton({
+            Title = "Load config",
+            Description = "โหลดการตั้งค่าจากไฟล์คอนฟิกที่เลือก",
+            Callback = function()
+                local name = SaveManager.Options.SaveManager_ConfigList.Value
+
+                local success, err = self:Load(name)
+                if not success then
+                    return self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "การโหลดคอนฟิกล้มเหลว: " .. err,
+                        Duration = 7
+                    })
+                end
+
+                self.Library:Notify({
+                    Title = "Interface",
+                    Content = "Config loader",
+                    SubContent = string.format("Loaded config %q", name),
                     Duration = 7
                 })
             end
+        })
 
-            local success, err = self:Save(name)
-            if not success then
-                return self.Library:Notify({
+        -- Overwrite config
+        section:AddButton({
+            Title = "Overwrite config",
+            Description = "บันทึกทับไฟล์คอนฟิกที่เลือกด้วยการตั้งค่าปัจจุบัน",
+            Callback = function()
+                local name = SaveManager.Options.SaveManager_ConfigList.Value
+
+                local success, err = self:Save(name)
+                if not success then
+                    return self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "การบันทึกทับล้มเหลว: " .. err,
+                        Duration = 7
+                    })
+                end
+
+                self.Library:Notify({
                     Title = "Interface",
                     Content = "Config loader",
-                    SubContent = "การบันทึกคอนฟิกล้มเหลว: " .. err,
+                    SubContent = string.format("Overwrote config %q", name),
                     Duration = 7
                 })
             end
+        })
 
-            self.Library:Notify({
-                Title = "Interface",
-                Content = "Config loader",
-                SubContent = string.format("Created config %q", name),
-                Duration = 7
-            })
+        -- Refresh list
+        section:AddButton({
+            Title = "Refresh list",
+            Description = "อัพเดตรายการไฟล์คอนฟิกจากโฟลเดอร์",
+            Callback = function()
+                SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
+                SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
+            end
+        })
 
-            SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
-            SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
-        end
-    })
+        -- Autoload toggle (replaces previous 'Set as autoload' button)
+        local AutoToggle = section:AddToggle("SaveManager_AutoLoad", { Title = "Autoload", Description = "ตั้งค่าให้โหลดคอนฟิกนี้อัตโนมัติเมื่อเริ่มเกม", Default = false })
 
-    -- Load config
-    section:AddButton({
-        Title = "Load config",
-        Description = "โหลดการตั้งค่าจากไฟล์คอนฟิกที่เลือก",
-        Callback = function()
+        AutoToggle:OnChanged(function()
             local name = SaveManager.Options.SaveManager_ConfigList.Value
+            local autopath = getConfigsFolder(self) .. "/autoload.txt"
 
-            local success, err = self:Load(name)
-            if not success then
-                return self.Library:Notify({
-                    Title = "Interface",
-                    Content = "Config loader",
-                    SubContent = "การโหลดคอนฟิกล้มเหลว: " .. err,
-                    Duration = 7
-                })
-            end
+            if SaveManager.Options.SaveManager_AutoLoad.Value then
+                if not name or name == "" then
+                    self.Library:Notify({
+                        Title = "Interface",
+                        Content = "Config loader",
+                        SubContent = "โปรดเลือกคอนฟิกก่อนตั้งค่า Autoload",
+                        Duration = 7
+                    })
+                    -- revert toggle
+                    SaveManager.Options.SaveManager_AutoLoad:SetValue(false)
+                    return
+                end
 
-            self.Library:Notify({
-                Title = "Interface",
-                Content = "Config loader",
-                SubContent = string.format("Loaded config %q", name),
-                Duration = 7
-            })
-        end
-    })
-
-    -- Overwrite config
-    section:AddButton({
-        Title = "Overwrite config",
-        Description = "บันทึกทับไฟล์คอนฟิกที่เลือกด้วยการตั้งค่าปัจจุบัน",
-        Callback = function()
-            local name = SaveManager.Options.SaveManager_ConfigList.Value
-
-            local success, err = self:Save(name)
-            if not success then
-                return self.Library:Notify({
-                    Title = "Interface",
-                    Content = "Config loader",
-                    SubContent = "การบันทึกทับล้มเหลว: " .. err,
-                    Duration = 7
-                })
-            end
-
-            self.Library:Notify({
-                Title = "Interface",
-                Content = "Config loader",
-                SubContent = string.format("Overwrote config %q", name),
-                Duration = 7
-            })
-        end
-    })
-
-    -- Refresh list
-    section:AddButton({
-        Title = "Refresh list",
-        Description = "อัพเดตรายการไฟล์คอนฟิกจากโฟลเดอร์",
-        Callback = function()
-            SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
-            SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
-        end
-    })
-
-    -- Autoload toggle (replaces previous 'Set as autoload' button)
-    local AutoToggle = section:AddToggle("SaveManager_AutoLoad", { Title = "Autoload", Description = "ตั้งค่าให้โหลดคอนฟิกนี้อัตโนมัติเมื่อเริ่มเกม", Default = false })
-
-    AutoToggle:OnChanged(function()
-        local name = SaveManager.Options.SaveManager_ConfigList.Value
-        local autopath = getConfigsFolder(self) .. "/autoload.txt"
-
-        -- Persist the toggle state separately so the toggle remains between sessions
-        writeAutoloadToggle(self, SaveManager.Options.SaveManager_AutoLoad.Value)
-
-        if SaveManager.Options.SaveManager_AutoLoad.Value then
-            -- If a config is selected, set it as the autoload target
-            if name and name ~= "" then
                 pcall(writefile, autopath, name)
                 if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
                     SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. name)
@@ -437,85 +415,39 @@ local SaveManager = {} do
                     Duration = 7
                 })
             else
-                -- No config selected, keep toggle on but inform user to select one.
+                pcall(function() if isfile(autopath) then pcall(delfile, autopath) end end)
                 if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
-                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("ตั้งค่าเป็น Autoload (ยังไม่ได้เลือกคอนฟิก)")
+                    SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไม่มีการโหลดอัตโนมัติ")
                 end
 
                 self.Library:Notify({
                     Title = "Interface",
                     Content = "Config loader",
-                    SubContent = "Autoload เปิดอยู่ แต่ยังไม่ได้เลือกคอนฟิกล — กรุณาเลือกคอนฟิกเพื่อกำหนดเป้าหมาย",
+                    SubContent = "Autoload cleared",
                     Duration = 7
                 })
             end
-        else
-            -- Turn off autoload: remove autoload.txt but keep toggle persisted as off
-            pcall(function() if isfile(autopath) then pcall(delfile, autopath) end end)
+        end)
+
+        -- populate current autoload desc & initial toggle state if exists
+        local autop = getConfigsFolder(self) .. "/autoload.txt"
+        if isfile(autop) then
+            local name = readfile(autop)
+            -- set dropdown value (if exists in list)
+            SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
+            SaveManager.Options.SaveManager_ConfigList:SetValue(name)
+            SaveManager.Options.SaveManager_AutoLoad:SetValue(true)
             if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
-                SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไม่มีการโหลดอัตโนมัติ")
-            end
-
-            self.Library:Notify({
-                Title = "Interface",
-                Content = "Config loader",
-                SubContent = "Autoload cleared",
-                Duration = 7
-            })
-        end
-    end)
-
-    -- If the user changes the selected config while Autoload toggle is ON, update autoload target automatically
-    local cfgDropdown = SaveManager.Options.SaveManager_ConfigList
-    pcall(function()
-        if cfgDropdown and cfgDropdown.OnChanged then
-            cfgDropdown:OnChanged(function()
-                local selected = SaveManager.Options.SaveManager_ConfigList.Value
-                local autopath = getConfigsFolder(self) .. "/autoload.txt"
-                if SaveManager.Options.SaveManager_AutoLoad and SaveManager.Options.SaveManager_AutoLoad.Value then
-                    if selected and selected ~= "" then
-                        pcall(writefile, autopath, selected)
-                        if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
-                            SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. selected)
-                        end
-                        self.Library:Notify({ Title = "Interface", Content = "Config loader", SubContent = string.format("Updated autoload to %q", selected), Duration = 5 })
-                    end
-                end
-            end)
-        end
-    end)
-
-    -- populate current autoload desc & initial toggle state if exists
-    local autop = getConfigsFolder(self) .. "/autoload.txt"
-    -- Refresh the dropdown values to ensure selection works
-    SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
-
-    local toggleState = readAutoloadToggle(self)
-    if isfile(autop) then
-        local name = readfile(autop)
-        SaveManager.Options.SaveManager_ConfigList:SetValue(name)
-        -- If autoload.txt exists we consider that autoload target is set; set toggleState true for UI convenience
-        if not toggleState then toggleState = true end
-        SaveManager.Options.SaveManager_AutoLoad:SetValue(true)
-        if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
-            SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. name)
-        end
-    else
-        -- No autoload target file. Respect persisted toggle state (autoload_toggle.txt) even if no autoload target exists.
-        SaveManager.Options.SaveManager_AutoLoad:SetValue(toggleState)
-        if toggleState then
-            if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
-                SaveManager.Options.SaveManager_AutoLoad:SetDesc("ตั้งค่าเป็น Autoload (ยังไม่ได้เลือกคอนฟิก)")
+                SaveManager.Options.SaveManager_AutoLoad:SetDesc("กำลังโหลดอัตโนมัติ: " .. name)
             end
         else
             if SaveManager.Options.SaveManager_AutoLoad.SetDesc then
                 SaveManager.Options.SaveManager_AutoLoad:SetDesc("ไม่มีการโหลดอัตโนมัติ")
             end
         end
+
+        SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "SaveManager_AutoLoad" })
     end
-
-    SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "SaveManager_AutoLoad" })
-end
 
     -- initial build
     SaveManager:BuildFolderTree()
