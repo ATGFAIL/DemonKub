@@ -175,6 +175,14 @@ local SaveManager = {} do
     function SaveManager:SetLibrary(library)
         self.Library = library
         self.Options = library.Options
+
+        -- Try to auto-load config for this map immediately when library is set.
+        -- This makes the autoload behavior persistent across sessions (if autoload.txt exists).
+        pcall(function()
+            -- LoadAutoloadConfig uses self.Library for notifications and self:Load to apply settings.
+            -- Wrapping in pcall prevents errors if UI options haven't been built yet.
+            self:LoadAutoloadConfig()
+        end)
     end
 
     function SaveManager:Save(name)
