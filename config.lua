@@ -3,8 +3,10 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 
 local InterfaceManager = {} do
-	-- root folder (default changed)
+	-- เปลี่ยน default root folder เป็น ATGHubSettings
 	InterfaceManager.FolderRoot = "ATGHubSettings"
+	-- ถ้ามีโฟลเดอร์เก่า ให้ระบุชื่อไว้เพื่อ migration
+	local LEGACY_FOLDER = "FluentSettings"
 
 	-- default settings
     InterfaceManager.Settings = {
@@ -51,62 +53,55 @@ local InterfaceManager = {} do
 		end
 	end
 
-	-- best-effort copy helpers for migrating legacy folder
-	local function copyFile(src, dst)
-		if not isfile(src) then return false end
-		local ok, content = pcall(readfile, src)
-		if not ok then return false end
-		local folder = dst:match("^(.*)/[^/]+$")
-		if folder and not isfolder(folder) then makefolder(folder) end
-		pcall(writefile, dst, content)
-		return true
-	end
-
-	local function copyFilesInFolder(srcFolder, dstFolder)
-		-- listfiles might not exist in every executor; guard with pcall
-		if not listfiles then return end
-		local ok, files = pcall(listfiles, srcFolder)
-		if not ok or type(files) ~= "table" then return end
-		ensureFolder(dstFolder)
-		for _, f in ipairs(files) do
-			local base = f:match("([^/\\]+)$") or f
-			local dst = dstFolder .. "/" .. base
-			pcall(copyFile, f, dst)
-		end
-	end
-
-	-- Migrate legacy FluentSettings -> new root (best-effort, non-destructive)
-	function InterfaceManager:MigrateLegacyFolder(oldName, newName)
-		if not isfolder(oldName) then
-			return false, "no legacy folder"
-		end
-		if not newName or newName == "" then newName = self.FolderRoot end
-		ensureFolder(newName)
-
-		-- copy root-level files
-		pcall(copyFilesInFolder, oldName, newName)
-
-		-- copy common subfolders
-		local subs = { "Themes", "settings", "Imports" }
-		for _, sub in ipairs(subs) do
-			local s = oldName .. "/" .. sub
-			local d = newName .. "/" .. sub
-			if isfolder(s) then
-				pcall(copyFilesInFolder, s, d)
+	-- copy files from src folder into dest (non-destructive: จะไม่เขียนทับไฟล์ที่มีอยู่)
+	local function copyFolderNonDestructive(src, dest)
+		-- ensure dest exists
+		ensureFolder(dest)
+		-- try listfiles
+		if type(listfiles) == "function" then
+			local ok, files = pcall(listfiles, src)
+			if ok and type(files) == "table" then
+				for _, f in ipairs(files) do
+					-- base filename
+					local base = f:match("([^/\\]+)$") or f
+					local target = dest .. "/" .. base
+					if isfile(f) then
+						if not isfile(target) then
+							local ok2, content = pcall(readfile, f)
+							if ok2 and content then
+								pcall(writefile, target, content)
+							end
+						end
+					end
+				end
 			end
 		end
 
-		return true, "migrated"
+		-- try listfolders (to recurse)
+		if type(listfolders) == "function" then
+			local ok2, folders = pcall(listfolders, src)
+			if ok2 and type(folders) == "table" then
+				for _, sub in ipairs(folders) do
+					local base = sub:match("([^/\\]+)$") or sub
+					local targetSub = dest .. "/" .. base
+					copyFolderNonDestructive(sub, targetSub)
+				end
+			end
+		end
 	end
 
 	-- build folder tree with Themes, Imports, per-place folders
     function InterfaceManager:BuildFolderTree()
 		local root = self.FolderRoot
 
-		-- auto-migrate if old folder exists and differs
-		if root ~= "FluentSettings" and isfolder("FluentSettings") and not isfolder(root) then
-			-- best-effort copy, do not delete originals
-			pcall(function() self:MigrateLegacyFolder("FluentSettings", root) end)
+		-- ถ้ามีโฟลเดอร์ legacy อยู่ แต่โฟลเดอร์ใหม่ยังไม่มี ให้ migrate ไฟล์
+		if isfolder(LEGACY_FOLDER) and not isfolder(root) then
+			pcall(function()
+				-- create new root then copy
+				ensureFolder(root)
+				-- copy root-level files and subfolders non-destructive
+				copyFolderNonDestructive(LEGACY_FOLDER, root)
+			end)
 		end
 
 		ensureFolder(root)
@@ -115,7 +110,7 @@ local InterfaceManager = {} do
 		local placeFolder = root .. "/" .. placeId
 		ensureFolder(placeFolder)
 
-		-- legacy settings folder (kept)
+		-- legacy settings folder kept for compatibility
 		local settingsFolder = root .. "/settings"
 		ensureFolder(settingsFolder)
 
@@ -137,8 +132,6 @@ local InterfaceManager = {} do
 
     function InterfaceManager:SetFolder(folder)
 		self.FolderRoot = tostring(folder or "ATGHubSettings")
-		-- try to migrate legacy FluentSettings -> new folder if present
-		pcall(function() self:MigrateLegacyFolder("FluentSettings", self.FolderRoot) end)
 		self:BuildFolderTree()
 	end
 
@@ -226,17 +219,21 @@ local InterfaceManager = {} do
 			root .. "/" .. getPlaceId() .. "/Themes"
 		}
 		for _, folder in ipairs(themePaths) do
-			if isfolder(folder) and listfiles then
-				for _, fname in ipairs(listfiles(folder) or {}) do
-					local lfname = fname
-					if lfname:match("%.lua$") or lfname:match("%.json$") then
-						local base = lfname:match("([^/\\]+)$") or lfname
-						local display = base
-						display = display:gsub("^ATG Hub %- ", "")
-						display = display:gsub("%.lua$", ""):gsub("%.json$", "")
-						display = display:gsub("%_", " ")
-						local ext = lfname:match("%.([a-zA-Z0-9]+)$")
-						table.insert(themes, { name = display, path = lfname, ext = ext })
+			if isfolder(folder) then
+				if type(listfiles) == "function" then
+					local ok, files = pcall(listfiles, folder)
+					if ok and type(files) == "table" then
+						for _, fname in ipairs(files) do
+							if fname:match("%.lua$") or fname:match("%.json$") then
+								local base = fname:match("([^/\\]+)$") or fname
+								local display = base
+								display = display:gsub("^ATG Hub %- ", "")
+								display = display:gsub("%.lua$", ""):gsub("%.json$", "")
+								display = display:gsub("%_", " ")
+								local ext = fname:match("%.([a-zA-Z0-9]+)$")
+								table.insert(themes, { name = display, path = fname, ext = ext })
+							end
+						end
 					end
 				end
 			end
@@ -258,7 +255,7 @@ local InterfaceManager = {} do
 		local fname = "ATG Hub - " .. safe .. "." .. ext
 		local full = rootThemes .. "/" .. fname
 
-		-- overwrite if exists
+		-- overwrite if exists (import explicitly replaces)
 		writefile(full, tostring(content or ""))
 
 		-- attempt to register immediately
@@ -336,7 +333,6 @@ local InterfaceManager = {} do
 		local names = {}
 		if not library then return names end
 
-		-- if library.Themes is an array of strings
 		if type(library.Themes) == "table" then
 			local numeric = true
 			for k,v in pairs(library.Themes) do
@@ -353,20 +349,17 @@ local InterfaceManager = {} do
 			end
 		end
 
-		-- also include dynamic imports if any
 		if library.DynamicImportedThemes then
 			for k,v in pairs(library.DynamicImportedThemes) do
 				names[k] = true
 			end
 		end
 
-		-- include on-disk themes
 		local disk = InterfaceManager:ScanThemes()
 		for _, item in ipairs(disk) do
 			names[item.name] = true
 		end
 
-		-- convert to array
 		local out = {}
 		for k,_ in pairs(names) do table.insert(out, k) end
 		table.sort(out)
@@ -393,7 +386,6 @@ local InterfaceManager = {} do
 			Values = mergedValues,
 			Default = Settings.Theme,
 			Callback = function(Value)
-				-- try to set using library API if available
 				if type(Library.SetTheme) == "function" then
 					pcall(function() Library:SetTheme(Value) end)
 				end
@@ -424,7 +416,7 @@ local InterfaceManager = {} do
 			Default = Settings.Transparency,
 			Callback = function(Value)
 				if type(Library.ToggleTransparency) == "function" then
-					Library:ToggleTransparency(Value)
+					Library.ToggleTransparency(Value)
 				end
 				Settings.Transparency = Value
                 InterfaceManager:SaveSettings()
