@@ -1,5 +1,5 @@
 -- Unified Fluent toggle + draggable imgButton (mobile / no-keyboard friendly)
--- เพิ่ม UIStroke ที่เปลี่ยนสีวิ่งตลอดเวลา (RGB / HSV cycling)
+-- เพิ่ม UIStroke ที่สีวิ่งตลอดเวลา (RGB hue cycle)
 -- LocalScript (StarterPlayerScripts หรือ PlayerGui)
 
 local Players = game:GetService("Players")
@@ -14,15 +14,17 @@ local Camera = workspace.CurrentCamera
 local FORCE_SHOW_IMG_BUTTON = false
 
 -- START: กำหนดตำแหน่งเริ่มต้น (center Y เป็นพิกเซลจากขอบบน)
--- ค่าเล็ก = ยิ่งอยู่สูง
-local START_Y = 4
+local START_Y = 1
 
--- UIStroke animation parameters (ปรับได้)
-local HUE_SPEED = 0.12         -- ความเร็วการเปลี่ยนสี (cycles per second)
-local THICKNESS_PRIMARY = 2    -- ความหนาของเส้นหลัก
-local THICKNESS_GLOW = 5       -- ความหนาของเส้นชั้นรอง (ทำเป็น glow)
-local PRIMARY_ALPHA = 0.0      -- โปร่งใสของเส้นหลัก (0 = ทึบ)
-local GLOW_ALPHA = 0.7         -- โปร่งใสของ glow (ค่ามาก = ใสขึ้น)
+-- ปรับแต่ง stroke animation ที่นี่
+local STROKE_THICKNESS_BASE = 1        -- ความหนาพื้นฐานของเส้น
+local STROKE_THICKNESS_PULSE = 1.5     -- จำนวนที่เพิ่ม/ลดสำหรับ pulse
+local STROKE_PULSE_SPEED = 2.0         -- ความเร็วของการ pulse (Hz)
+local STROKE_HUE_SPEED = 0.09          -- ความเร็วของการเปลี่ยน hue (cycles per second)
+local STROKE_SATURATION = 0.95         -- ความอิ่มของสี (0-1)
+local STROKE_VALUE = 1.0               -- ความสว่างของสี (0-1)
+local STROKE_TRANSP_BASE = 0.05        -- โปร่งแสงพื้นฐาน
+local STROKE_TRANSP_PULSE = 0.12       -- การเปลี่ยนแปลงโปร่งแสง
 
 -- ตรวจสถานะ input (keyboard/touch/gamepad)
 local hasKeyboard = UserInputService.KeyboardEnabled
@@ -53,34 +55,27 @@ if shouldCreateImgButton and not imgButton and toggleGui then
     imgButton.AnchorPoint = Vector2.new(0.5, 0.5)
     imgButton.Position = UDim2.new(0.5, 0, 0, START_Y) -- center x = 50% ของจอ, center y = START_Y px จากบน
     imgButton.BackgroundTransparency = 0
-    imgButton.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+    imgButton.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     imgButton.BorderSizePixel = 0
     imgButton.Parent = toggleGui
     imgButton.Image = "rbxassetid://114090251469395" -- เปลี่ยน asset ตามชอบ
 
     local uic = Instance.new("UICorner", imgButton)
-    uic.CornerRadius = UDim.new(0, 12)
+    uic.CornerRadius = UDim.new(0, 8)
 
-    -- ถ้าต้องการ stroke แบบปกติ (จะถูกปรับ/animate ด้านล่าง)
-    -- สร้างสองชั้น: primary stroke + glow stroke (overlay)
-    local glowStroke = Instance.new("UIStroke")
-    glowStroke.Name = "GlowStroke"
-    glowStroke.Parent = imgButton
-    glowStroke.Thickness = THICKNESS_GLOW
-    glowStroke.Transparency = GLOW_ALPHA
-    glowStroke.LineJoinMode = Enum.LineJoinMode.Round -- ถ้ามี property ใช้ให้โค้งสวย (ปล. ถ้าเวอร์ชันไม่มีจะ ignore)
-    -- สีจะถูกตั้งใน runtime
-
-    local mainStroke = Instance.new("UIStroke")
-    mainStroke.Name = "MainStroke"
-    mainStroke.Parent = imgButton
-    mainStroke.Thickness = THICKNESS_PRIMARY
-    mainStroke.Transparency = PRIMARY_ALPHA
-    mainStroke.LineJoinMode = Enum.LineJoinMode.Round
-    -- สีจะถูกตั้งใน runtime
+    -- สร้าง UIStroke ถ้ายังไม่มี (ตั้งชื่อเพื่อไม่สร้างซ้ำ)
+    local stroke = imgButton:FindFirstChild("FluentStroke")
+    if not stroke then
+        stroke = Instance.new("UIStroke")
+        stroke.Name = "FluentStroke"
+        stroke.Parent = imgButton
+        stroke.Thickness = STROKE_THICKNESS_BASE
+        stroke.Transparency = STROKE_TRANSP_BASE
+        stroke.LineJoinMode = Enum.LineJoinMode.Round -- ถ้ามีเวอร์ชันที่รองรับ
+    end
 end
 
--- helper: หาผู้สมัคร UI แบบ "Fluent"
+-- helper: หาผู้สมัคร UI แบบ "Fluent" (เหมือนเดิม)
 local function findFluentCandidates()
     local found = {}
     local function pushOnce(obj)
@@ -258,6 +253,7 @@ if imgButton then
 
         updateVpSize()
 
+        -- clamp center coordinate so that button center stays onscreen (can reach edges)
         local function clampCenter(cx, cy)
             local absSize = imgButton.AbsoluteSize
             updateVpSize()
@@ -267,7 +263,7 @@ if imgButton then
             end
             local halfW = absSize.X * 0.5
             local halfH = absSize.Y * 0.5
-            local minX = halfW * 0.5
+            local minX = halfW * 0.5 -- tiny allowance (avoid fully offscreen)
             local maxX = math.max(halfW, vpW - halfW)
             local minY = halfH * 0.5
             local maxY = math.max(halfH, vpH - halfH)
@@ -283,6 +279,7 @@ if imgButton then
                 dragInput = input
                 dragStart = input.Position
 
+                -- compute current center absolute (AbsolutePosition is top-left)
                 local absPos = imgButton.AbsolutePosition
                 local absSize = imgButton.AbsoluteSize
                 startCenter = Vector2.new(absPos.X + absSize.X * 0.5, absPos.Y + absSize.Y * 0.5)
@@ -296,7 +293,7 @@ if imgButton then
             end
         end)
 
-        -- Global InputChanged to get positions
+        -- Global InputChanged to get positions (this works for touch/mouse movement)
         UserInputService.InputChanged:Connect(function(input)
             if dragging and dragInput and input == dragInput and input.Position then
                 local delta = input.Position - dragStart
@@ -335,57 +332,43 @@ if imgButton then
             local cx, cy = clampCenter(centerX, centerY)
             imgButton.Position = UDim2.fromOffset(cx, cy)
         end
-    end
-end
 
--- ========== Animated stroke (HSV cycling) ==========
-do
-    if imgButton then
-        local mainStroke = imgButton:FindFirstChild("MainStroke")
-        local glowStroke = imgButton:FindFirstChild("GlowStroke")
+        -- --- Stroke animation (RenderStepped) ---
+        local stroke = imgButton:FindFirstChild("FluentStroke")
+        local animateConn
+        if stroke then
+            -- ensure initial settings
+            stroke.Thickness = STROKE_THICKNESS_BASE
+            stroke.Transparency = STROKE_TRANSP_BASE
 
-        -- safety: if missing, create quickly
-        if not mainStroke then
-            mainStroke = Instance.new("UIStroke")
-            mainStroke.Name = "MainStroke"
-            mainStroke.Parent = imgButton
-            mainStroke.Thickness = THICKNESS_PRIMARY
-            mainStroke.Transparency = PRIMARY_ALPHA
-        end
-        if not glowStroke then
-            glowStroke = Instance.new("UIStroke")
-            glowStroke.Name = "GlowStroke"
-            glowStroke.Parent = imgButton
-            glowStroke.Thickness = THICKNESS_GLOW
-            glowStroke.Transparency = GLOW_ALPHA
-        end
+            local function animate(dt)
+                local t = tick()
+                -- hue cycles 0..1
+                local h = (t * STROKE_HUE_SPEED) % 1
+                -- slightly vary saturation/value if desired
+                local s = STROKE_SATURATION
+                local v = STROKE_VALUE
+                -- set color from HSV
+                stroke.Color = Color3.fromHSV(h, s, v)
 
-        -- animation loop (ใช้ RenderStepped) — ประหยัดและลื่นบนมือถือ
-        local t = 0
-        local conn
-        conn = RunService.RenderStepped:Connect(function(dt)
-            t = t + dt * HUE_SPEED
-            local h1 = t % 1
-            local h2 = (h1 + 0.33) % 1 -- offset สีเล็กน้อยให้มีความสวย
-            -- ลด saturation/brightness เล็กน้อยสำหรับ glow ให้ดูนุ่ม
-            local c1 = Color3.fromHSV(h1, 0.95, 1)
-            local c2 = Color3.fromHSV(h2, 0.85, 0.95)
+                -- pulse thickness
+                local pulse = (math.sin(t * STROKE_PULSE_SPEED * math.pi * 2) + 1) / 2 -- 0..1
+                stroke.Thickness = STROKE_THICKNESS_BASE + pulse * STROKE_THICKNESS_PULSE
 
-            -- ปรับสีและ thickness ถ้าจำเป็น
-            pcall(function()
-                mainStroke.Color = c1
-                glowStroke.Color = c2
-            end)
-        end)
-
-        -- ถ้าปุ่มถูกลบ ให้ยกเลิก connection (ป้องกัน memory leak)
-        imgButton.AncestryChanged:Connect(function(child, parent)
-            if not parent then
-                if conn and conn.Connected then
-                    conn:Disconnect()
-                end
+                -- optional subtle transparency pulse for shimmer
+                stroke.Transparency = STROKE_TRANSP_BASE + pulse * STROKE_TRANSP_PULSE
             end
-        end)
+
+            animateConn = RunService.RenderStepped:Connect(animate)
+
+            -- cleanup if button removed
+            imgButton.AncestryChanged:Connect(function(child, parent)
+                if not parent and animateConn then
+                    animateConn:Disconnect()
+                    animateConn = nil
+                end
+            end)
+        end
     end
 end
 
