@@ -1,19 +1,24 @@
-local Toggle = Tabs.Main:AddToggle("MyToggle", {Title = "Toggle", Default = false })
+-- SaveManager (ปรับปรุง: โครงสร้างไฟล์เรียบง่ายขึ้น, เพิ่ม Description(ไทย) + Title(อังกฤษ) ให้ UI)
+local Toggle = Tabs.Main:AddToggle("MyToggle", { Title = "Toggle", Description = "สวิตช์เปิด/ปิดการทำงาน", Default = false })
 
-    Toggle:OnChanged(function()
-        print("Toggle changed:", Options.MyToggle.Value)
-    end)
+Toggle:OnChanged(function()
+    print("Toggle changed:", Options.MyToggle.Value)
+end)
 
-    Options.MyToggle:SetValue(false)
+Options.MyToggle:SetValue(false)
 
-local httpService = game:GetService("HttpService")
+local HttpService = game:GetService("HttpService")
 local Workspace = game:GetService("Workspace")
 
 local SaveManager = {} do
 	-- root folder (can be changed via SetFolder)
+	-- ค่าเริ่มต้นเก็บไว้เป็น ATGSettings ตามที่เดิม
 	SaveManager.FolderRoot = "ATGSettings"
 	SaveManager.Ignore = {}
 	SaveManager.Options = {}
+	SaveManager.Library = nil
+
+	-- Parser สำหรับ option ต่าง ๆ (ไม่เปลี่ยน)
 	SaveManager.Parser = {
 		Toggle = {
 			Save = function(idx, object) 
@@ -108,37 +113,30 @@ local SaveManager = {} do
 		end
 	end
 
-	-- get configs folder for current place/map
+	-- ปรับโครงสร้างเป็น Root/<PlaceId>_<MapName>/settings เพื่อไม่ต้องสร้างชั้นลึกมาก
 	local function getConfigsFolder(self)
-		local root = self.FolderRoot
+		local root = tostring(self.FolderRoot or "ATGSettings")
 		local placeId = getPlaceId()
 		local mapName = getMapName()
-		-- FluentSettings/<PlaceId>/<MapName>/settings
-		return root .. "/" .. placeId .. "/" .. mapName .. "/settings"
+		local folderName = sanitizeFilename(placeId .. "_" .. mapName)
+		return root .. "/" .. folderName .. "/settings"
 	end
 
 	local function getConfigFilePath(self, name)
 		local folder = getConfigsFolder(self)
-		return folder .. "/" .. name .. ".json"
+		return folder .. "/" .. sanitizeFilename(name) .. ".json"
 	end
 
 	-- Build folder tree and migrate legacy configs if found (copy only)
 	function SaveManager:BuildFolderTree()
-		local root = self.FolderRoot
+		local root = tostring(self.FolderRoot or "ATGSettings")
 		ensureFolder(root)
 
-		local placeId = getPlaceId()
-		local placeFolder = root .. "/" .. placeId
-		ensureFolder(placeFolder)
+		-- สร้างเฉพาะโฟลเดอร์ที่จำเป็น: โฟลเดอร์ของการตั้งค่าสำหรับ place+map
+		local configsFolder = getConfigsFolder(self)
+		ensureFolder(configsFolder)
 
-		local mapName = getMapName()
-		local mapFolder = placeFolder .. "/" .. mapName
-		ensureFolder(mapFolder)
-
-		local settingsFolder = mapFolder .. "/settings"
-		ensureFolder(settingsFolder)
-
-		-- legacy folder: <root>/settings (old layout). If files exist there, copy them into current map settings
+		-- legacy folder migration: <root>/settings (old layout)
 		local legacySettingsFolder = root .. "/settings"
 		if isfolder(legacySettingsFolder) then
 			local files = listfiles(legacySettingsFolder)
@@ -147,24 +145,23 @@ local SaveManager = {} do
 				if f:sub(-5) == ".json" then
 					local base = f:match("([^/\\]+)%.json$")
 					if base and base ~= "options" then
-						local dest = settingsFolder .. "/" .. base .. ".json"
+						local dest = configsFolder .. "/" .. base .. ".json"
 						-- copy only if destination does not exist yet
 						if not isfile(dest) then
 							local ok, data = pcall(readfile, f)
 							if ok and data then
-								local success, err = pcall(writefile, dest, data)
-								-- ignore write errors but do not fail
+								pcall(writefile, dest, data)
 							end
 						end
 					end
 				end
 			end
 
-			-- also migrate autoload.txt if present (copy only)
+			-- migrate autoload.txt if present (copy only)
 			local autopath = legacySettingsFolder .. "/autoload.txt"
 			if isfile(autopath) then
 				local autodata = readfile(autopath)
-				local destAuto = settingsFolder .. "/autoload.txt"
+				local destAuto = configsFolder .. "/autoload.txt"
 				if not isfile(destAuto) then
 					pcall(writefile, destAuto, autodata)
 				end
@@ -179,7 +176,7 @@ local SaveManager = {} do
 	end
 
 	function SaveManager:SetFolder(folder)
-		self.FolderRoot = tostring(folder or "FluentSettings")
+		self.FolderRoot = tostring(folder or "ATGSettings")
 		self:BuildFolderTree()
 	end
 
@@ -204,7 +201,7 @@ local SaveManager = {} do
 			table.insert(data.objects, self.Parser[option.Type].Save(idx, option))
 		end
 
-		local success, encoded = pcall(httpService.JSONEncode, httpService, data)
+		local success, encoded = pcall(HttpService.JSONEncode, HttpService, data)
 		if not success then
 			return false, "failed to encode data"
 		end
@@ -213,7 +210,11 @@ local SaveManager = {} do
 		local folder = fullPath:match("^(.*)/[^/]+$")
 		if folder then ensureFolder(folder) end
 
-		writefile(fullPath, encoded)
+		local ok, err = pcall(function() writefile(fullPath, encoded) end)
+		if not ok then
+			return false, "failed to write file: " .. tostring(err)
+		end
+
 		return true
 	end
 
@@ -225,7 +226,7 @@ local SaveManager = {} do
 		local file = getConfigFilePath(self, name)
 		if not isfile(file) then return false, "invalid file" end
 
-		local success, decoded = pcall(httpService.JSONDecode, httpService, readfile(file))
+		local success, decoded = pcall(HttpService.JSONDecode, HttpService, readfile(file))
 		if not success then return false, "decode error" end
 
 		for _, option in next, decoded.objects do
@@ -268,37 +269,43 @@ local SaveManager = {} do
 			local name = readfile(autopath)
 			local success, err = self:Load(name)
 			if not success then
-				return self.Library:Notify({
+				if self.Library and self.Library.Notify then
+					return self.Library:Notify({
+						Title = "Interface",
+						Content = "Config loader",
+						SubContent = "Failed to load autoload config: " .. err,
+						Duration = 7
+					})
+				end
+			end
+
+			if self.Library and self.Library.Notify then
+				self.Library:Notify({
 					Title = "Interface",
 					Content = "Config loader",
-					SubContent = "Failed to load autoload config: " .. err,
+					SubContent = string.format("Auto loaded config %q", name),
 					Duration = 7
 				})
 			end
-
-			self.Library:Notify({
-				Title = "Interface",
-				Content = "Config loader",
-				SubContent = string.format("Auto loaded config %q", name),
-				Duration = 7
-			})
 		end
 	end
 
+	-- UI: สร้าง section สำหรับจัดการ config (เติม Description ภาษาไทย + Title ภาษาอังกฤษ)
 	function SaveManager:BuildConfigSection(tab)
 		assert(self.Library, "Must set SaveManager.Library")
 
 		local section = tab:AddSection("Configuration")
 
-		section:AddInput("SaveManager_ConfigName",    { Title = "Config name" })
-		section:AddDropdown("SaveManager_ConfigList", { Title = "Config list", Values = self:RefreshConfigList(), AllowNull = true })
+		section:AddInput("SaveManager_ConfigName",    { Title = "Config name", Description = "ชื่อไฟล์คอนฟิก (ไม่ต้องใส่นามสกุล .json)" })
+		section:AddDropdown("SaveManager_ConfigList", { Title = "Config list", Values = self:RefreshConfigList(), AllowNull = true, Description = "รายการไฟล์คอนฟิกที่มีอยู่" })
 
 		section:AddButton({
 			Title = "Create config",
+			Description = "สร้างไฟล์คอนฟิกใหม่จากค่าปัจจุบัน",
 			Callback = function()
 				local name = SaveManager.Options.SaveManager_ConfigName.Value
 
-				if name:gsub(" ", "") == "" then
+				if not name or name:gsub(" ", "") == "" then
 					return self.Library:Notify({
 						Title = "Interface",
 						Content = "Config loader",
@@ -329,78 +336,96 @@ local SaveManager = {} do
 			end
 		})
 
-		section:AddButton({Title = "Load config", Callback = function()
-			local name = SaveManager.Options.SaveManager_ConfigList.Value
+		section:AddButton({
+			Title = "Load config",
+			Description = "โหลดค่าจากไฟล์คอนฟิกที่เลือก",
+			Callback = function()
+				local name = SaveManager.Options.SaveManager_ConfigList.Value
 
-			local success, err = self:Load(name)
-			if not success then
-				return self.Library:Notify({
+				local success, err = self:Load(name)
+				if not success then
+					return self.Library:Notify({
+						Title = "Interface",
+						Content = "Config loader",
+						SubContent = "Failed to load config: " .. err,
+						Duration = 7
+					})
+				end
+
+				self.Library:Notify({
 					Title = "Interface",
 					Content = "Config loader",
-					SubContent = "Failed to load config: " .. err,
+					SubContent = string.format("Loaded config %q", name),
 					Duration = 7
 				})
 			end
+		})
 
-			self.Library:Notify({
-				Title = "Interface",
-				Content = "Config loader",
-				SubContent = string.format("Loaded config %q", name),
-				Duration = 7
-			})
-		end})
+		section:AddButton({
+			Title = "Overwrite config",
+			Description = "บันทึกทับไฟล์คอนฟิกที่เลือก",
+			Callback = function()
+				local name = SaveManager.Options.SaveManager_ConfigList.Value
 
-		section:AddButton({Title = "Overwrite config", Callback = function()
-			local name = SaveManager.Options.SaveManager_ConfigList.Value
+				local success, err = self:Save(name)
+				if not success then
+					return self.Library:Notify({
+						Title = "Interface",
+						Content = "Config loader",
+						SubContent = "Failed to overwrite config: " .. err,
+						Duration = 7
+					})
+				end
 
-			local success, err = self:Save(name)
-			if not success then
-				return self.Library:Notify({
+				self.Library:Notify({
 					Title = "Interface",
 					Content = "Config loader",
-					SubContent = "Failed to overwrite config: " .. err,
+					SubContent = string.format("Overwrote config %q", name),
 					Duration = 7
 				})
 			end
+		})
 
-			self.Library:Notify({
-				Title = "Interface",
-				Content = "Config loader",
-				SubContent = string.format("Overwrote config %q", name),
-				Duration = 7
-			})
-		end})
-
-		section:AddButton({Title = "Refresh list", Callback = function()
-			SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
-			SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
-		end})
+		section:AddButton({
+			Title = "Refresh list",
+			Description = "อัปเดตรายการไฟล์คอนฟิก",
+			Callback = function()
+				SaveManager.Options.SaveManager_ConfigList:SetValues(self:RefreshConfigList())
+				SaveManager.Options.SaveManager_ConfigList:SetValue(nil)
+			end
+		})
 
 		local AutoloadButton
-		AutoloadButton = section:AddButton({Title = "Set as autoload", Description = "Current autoload config: none", Callback = function()
-			local name = SaveManager.Options.SaveManager_ConfigList.Value
-			local autopath = getConfigsFolder(self) .. "/autoload.txt"
-			writefile(autopath, name)
-			AutoloadButton:SetDesc("Current autoload config: " .. name)
-			self.Library:Notify({
-				Title = "Interface",
-				Content = "Config loader",
-				SubContent = string.format("Set %q to auto load", name),
-				Duration = 7
-			})
-		end})
+		AutoloadButton = section:AddButton({
+			Title = "Set as autoload",
+			Description = "ตั้งไฟล์ที่เลือกให้โหลดอัตโนมัติเมื่อเริ่ม",
+			Callback = function()
+				local name = SaveManager.Options.SaveManager_ConfigList.Value
+				local autopath = getConfigsFolder(self) .. "/autoload.txt"
+				writefile(autopath, tostring(name or ""))
+				AutoloadButton:SetDesc("Current autoload config: " .. tostring(name or "none"))
+				self.Library:Notify({
+					Title = "Interface",
+					Content = "Config loader",
+					SubContent = string.format("Set %q to auto load", name),
+					Duration = 7
+				})
+			end
+		})
 
 		-- populate current autoload desc if exists
 		local autop = getConfigsFolder(self) .. "/autoload.txt"
 		if isfile(autop) then
 			local name = readfile(autop)
 			AutoloadButton:SetDesc("Current autoload config: " .. name)
+		else
+			AutoloadButton:SetDesc("Current autoload config: none")
 		end
 
 		SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName" })
 	end
 
-	-- initial build
+	-- initial build: สร้างโฟลเดอร์ที่จำเป็น (เรียบง่าย)
 	SaveManager:BuildFolderTree()
 end
 
